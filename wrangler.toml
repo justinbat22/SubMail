@@ -1,0 +1,90 @@
+name = "tempmail"
+main = "src/index.ts"
+compatibility_date = "2024-09-25"
+compatibility_flags = ["nodejs_compat"]
+
+# ---------------------------------------------------------------------------
+# Environment variables (non-secret configuration).
+# Override per-environment below. Nothing here is a secret.
+# ---------------------------------------------------------------------------
+[vars]
+EMAIL_DOMAIN = "example.com"
+APP_URL = "https://app.example.com"
+MAILBOX_TTL_HOURS = "48"
+MAX_MESSAGE_SIZE = "10485760"        # 10 MiB total parsed message size
+MAX_ATTACHMENT_SIZE = "5242880"      # 5 MiB per attachment
+MAX_ATTACHMENTS_PER_MESSAGE = "10"
+MAX_MESSAGES_PER_MAILBOX = "200"
+CLEANUP_BATCH_SIZE = "50"
+
+# ---------------------------------------------------------------------------
+# D1 database binding.
+# Create with: npx wrangler d1 create tempmail-db
+# Paste the returned database_id below.
+# ---------------------------------------------------------------------------
+[[d1_databases]]
+binding = "DB"
+database_name = "tempmail-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+# ---------------------------------------------------------------------------
+# R2 bucket binding for attachments.
+# Create with: npx wrangler r2 bucket create tempmail-attachments
+# ---------------------------------------------------------------------------
+[[r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "tempmail-attachments"
+
+# ---------------------------------------------------------------------------
+# Static frontend assets (public/index.html, app.js, styles.css). Served
+# directly by Cloudflare's edge for matching paths without invoking the
+# Worker; any request that doesn't match a static file (i.e. everything
+# under /api/*) falls through to the fetch handler in src/index.ts. This is
+# what "the frontend and API should run through Cloudflare Workers" means in
+# practice — one deployable Worker, no separate hosting provider.
+# ---------------------------------------------------------------------------
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# ---------------------------------------------------------------------------
+# Cron trigger for expired-mailbox cleanup. Runs hourly at minute 0.
+# ---------------------------------------------------------------------------
+[triggers]
+crons = ["0 * * * *"]
+
+# ---------------------------------------------------------------------------
+# Email Routing: incoming mail for the configured catch-all is delivered to
+# this Worker's `email()` handler (see src/index.ts). This is intentionally
+# receive-only — this service is not a mail sender/relay (see README's
+# "No open relay" note), so no send_email binding is declared here. The
+# routing rule itself is configured via the Cloudflare dashboard or
+# `wrangler email` commands, since Email Routing DNS/catch-all setup is an
+# account/zone-level action, not a wrangler.toml declaration. See README.md
+# "Email Routing setup" for exact steps.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Example named environments. Duplicate/adjust as needed.
+# Usage: npx wrangler deploy --env staging
+# ---------------------------------------------------------------------------
+[env.staging.vars]
+EMAIL_DOMAIN = "staging.example.com"
+APP_URL = "https://staging-app.example.com"
+MAILBOX_TTL_HOURS = "48"
+MAX_MESSAGE_SIZE = "10485760"
+MAX_ATTACHMENT_SIZE = "5242880"
+MAX_ATTACHMENTS_PER_MESSAGE = "10"
+MAX_MESSAGES_PER_MAILBOX = "200"
+CLEANUP_BATCH_SIZE = "50"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "tempmail-db-staging"
+database_id = "REPLACE_WITH_YOUR_STAGING_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[env.staging.r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "tempmail-attachments-staging"

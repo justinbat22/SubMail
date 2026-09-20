@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TempMail — disposable inbox</title>
+<meta name="description" content="A temporary email address that receives mail and deletes itself. No account, no signup.">
+<meta name="color-scheme" content="light dark">
+
+<!--
+  Applied before first paint to avoid a flash of the wrong theme (spec §45).
+  Reads the persisted preference and sets data-theme on <html>; CSS below
+  reacts to both this attribute and prefers-color-scheme for "system" mode.
+-->
+<script>
+(function () {
+  try {
+    var stored = localStorage.getItem("tempmail:theme");
+    if (stored === "light" || stored === "dark") {
+      document.documentElement.setAttribute("data-theme", stored);
+    }
+  } catch (e) { /* localStorage unavailable (private mode, etc.) — fall back to system */ }
+})();
+</script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,500;0,600;1,400&family=Public+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap site-header__row">
+    <a class="wordmark" href="/" aria-label="TempMail home">
+      <svg aria-hidden="true" viewBox="0 0 24 24" class="wordmark__icon"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h17A1.5 1.5 0 0 1 22 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-17A1.5 1.5 0 0 1 2 18.5v-13Zm1.8.4 8.2 6.4 8.2-6.4"/></svg>
+      <span>TempMail</span>
+    </a>
+
+    <div class="theme-switch" role="group" aria-label="Theme">
+      <button type="button" class="theme-switch__btn" data-theme-choice="light" aria-pressed="false" title="Light theme">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.6M12 18.9v2.6M4.9 4.9l1.85 1.85M17.25 17.25l1.85 1.85M2.5 12h2.6M18.9 12h2.6M4.9 19.1l1.85-1.85M17.25 6.75l1.85-1.85"/></svg>
+        <span class="sr-only">Light</span>
+      </button>
+      <button type="button" class="theme-switch__btn" data-theme-choice="dark" aria-pressed="false" title="Dark theme">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20.5 14.5a8.5 8.5 0 1 1-9-11 7 7 0 0 0 9 11Z"/></svg>
+        <span class="sr-only">Dark</span>
+      </button>
+      <button type="button" class="theme-switch__btn" data-theme-choice="system" aria-pressed="false" title="Match system">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="12" rx="1.5"/><path d="M8.5 20h7M12 16.5V20"/></svg>
+        <span class="sr-only">System</span>
+      </button>
+    </div>
+  </div>
+  <div class="airmail-stripe" aria-hidden="true"></div>
+</header>
+
+<main id="main" class="wrap">
+
+  <section class="intro">
+    <h1>Temporary email</h1>
+    <p class="intro__sub">A disposable inbox that deletes itself. No account, nothing to remember.</p>
+  </section>
+
+  <section class="mailbox-card" aria-label="Your temporary address">
+    <div class="address-row">
+      <p class="address-row__value" id="address-value" aria-live="polite">
+        <span class="skeleton" id="address-skeleton" aria-hidden="true"></span>
+        <span id="address-text" hidden></span>
+      </p>
+      <button type="button" class="btn btn--icon" id="copy-btn" disabled aria-label="Copy address">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="1.5"/><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8"/></svg>
+        <span id="copy-btn-label">Copy</span>
+      </button>
+    </div>
+
+    <div class="mailbox-actions">
+      <button type="button" class="btn btn--ghost" id="new-address-btn" disabled>New address</button>
+      <button type="button" class="btn btn--ghost" id="custom-toggle-btn" aria-expanded="false" aria-controls="custom-form" disabled>Use custom name</button>
+    </div>
+
+    <form class="custom-form" id="custom-form" hidden>
+      <div class="custom-form__row">
+        <label for="custom-name" class="sr-only">Custom name</label>
+        <div class="custom-form__field">
+          <input type="text" id="custom-name" name="localPart" autocomplete="off" spellcheck="false"
+                 placeholder="your-name" maxlength="64" aria-describedby="custom-name-domain custom-name-status">
+          <span id="custom-name-domain" class="custom-form__domain"></span>
+        </div>
+        <button type="submit" class="btn btn--primary" id="custom-check-btn">Check &amp; create</button>
+      </div>
+      <p id="custom-name-status" class="custom-form__status" role="status" aria-live="polite"></p>
+    </form>
+  </section>
+
+  <section class="inbox" aria-label="Inbox">
+    <div class="inbox__head">
+      <h2>Inbox</h2>
+    </div>
+
+    <ul class="message-list" id="message-list"></ul>
+
+    <div class="empty-state" id="empty-state">
+      <p class="empty-state__title">No messages yet</p>
+      <p class="empty-state__sub">Waiting for incoming email&hellip;</p>
+    </div>
+  </section>
+
+</main>
+
+<!-- Message detail view. A dialog rather than a page navigation, so state
+     (inbox scroll position, polling) is preserved underneath. -->
+<div class="message-view" id="message-view" hidden>
+  <div class="message-view__backdrop" id="message-view-backdrop"></div>
+  <div class="message-view__panel" role="dialog" aria-modal="true" aria-labelledby="message-view-subject" id="message-view-panel">
+    <div class="message-view__head">
+      <button type="button" class="btn btn--icon" id="message-view-close" aria-label="Close message">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+      <button type="button" class="btn btn--ghost btn--danger" id="message-view-delete">Delete</button>
+    </div>
+
+    <div class="message-view__meta">
+      <h2 id="message-view-subject">Message</h2>
+      <dl class="message-view__fields">
+        <div><dt>From</dt><dd id="message-view-from"></dd></div>
+        <div><dt>To</dt><dd id="message-view-to"></dd></div>
+        <div><dt>Received</dt><dd id="message-view-date"></dd></div>
+      </dl>
+    </div>
+
+    <div class="message-view__body" id="message-view-body"></div>
+
+    <div class="message-view__attachments" id="message-view-attachments" hidden>
+      <h3>Attachments</h3>
+      <ul id="message-view-attachment-list"></ul>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="/app.js" defer></script>
+</body>
+</html>
