@@ -8,9 +8,9 @@ compatibility_flags = ["nodejs_compat"]
 # Override per-environment below. Nothing here is a secret.
 # ---------------------------------------------------------------------------
 [vars]
-EMAIL_DOMAIN = "example.com"
-APP_URL = "https://app.example.com"
-MAILBOX_TTL_HOURS = "48"
+EMAIL_DOMAIN = "submail.bond"
+APP_URL = "https://submail.bond"
+MAILBOX_TTL_HOURS = "24"
 MAX_MESSAGE_SIZE = "10485760"        # 10 MiB total parsed message size
 MAX_ATTACHMENT_SIZE = "5242880"      # 5 MiB per attachment
 MAX_ATTACHMENTS_PER_MESSAGE = "10"
@@ -25,7 +25,7 @@ CLEANUP_BATCH_SIZE = "50"
 [[d1_databases]]
 binding = "DB"
 database_name = "tempmail-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "e8708351-7e90-45db-ad39-a4ba5394c247"
 migrations_dir = "migrations"
 
 # ---------------------------------------------------------------------------
