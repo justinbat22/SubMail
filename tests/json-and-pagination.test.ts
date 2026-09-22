@@ -156,7 +156,7 @@ describe("POST /api/mailbox - JSON body handling (end to end)", () => {
     });
     expect(res.status).toBe(201);
     const body = (await res.json()) as { data: MailboxCreatedDto };
-    expect(body.data.address).toBe("jsonfixvalid@example.com");
+    expect(body.data.address).toBe(`jsonfixvalid@${env.EMAIL_DOMAIN}`);
   });
 });
 

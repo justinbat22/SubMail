@@ -8,6 +8,13 @@ declare module "cloudflare:test" {
     DB: D1Database;
     ATTACHMENTS: R2Bucket;
     EMAIL_DOMAIN: string;
+    // Backblaze B2 config. Not used when the ATTACHMENTS binding exists
+    // (the local R2 test bucket backs attachment storage in tests); the
+    // b2.ts test seam only falls back to B2 when no binding is provided.
+    B2_KEY_ID: string;
+    B2_APPLICATION_KEY: string;
+    B2_REGION: string;
+    B2_BUCKET: string;
     APP_URL: string;
     MAILBOX_TTL_HOURS: string;
     MAX_MESSAGE_SIZE: string;

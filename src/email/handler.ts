@@ -13,6 +13,7 @@ import {
 import { parseRawEmail, EmailParseError } from "./parser.js";
 import { validateAttachment } from "../lib/attachment-validation.js";
 import { normalizeLocalPart } from "../lib/validation.js";
+import { putStoredObject, deleteStoredObjects } from "../lib/b2.js";
 
 /**
  * Handles one incoming message delivered by Cloudflare Email Routing.
@@ -42,7 +43,7 @@ import { normalizeLocalPart } from "../lib/validation.js";
  *        recipient, duplicate/already-processed delivery): handled here,
  *        function returns normally (with setReject for the bounce cases).
  *        These are never retried, because retrying would never succeed.
- *      - Transient (an R2 upload failure, an unexpected D1 error): this
+ *      - Transient (a B2 upload failure, an unexpected D1 error): this
  *        function lets the error propagate. The `email()` entrypoint in
  *        src/index.ts does NOT catch-and-swallow these — an uncaught
  *        exception here causes Cloudflare to treat the delivery as failed,
@@ -50,12 +51,12 @@ import { normalizeLocalPart } from "../lib/validation.js";
  *        in. Silently swallowing these would otherwise cause a message to
  *        vanish forever after a purely transient infrastructure hiccup.
  *
- *  - R2 objects are uploaded BEFORE any D1 row is written, and the D1
+ *  - B2 objects are uploaded BEFORE any D1 row is written, and the D1
  *    message row + all its attachment rows are written together in a single
  *    atomic batch (see createMessageWithAttachments). This ordering means a
  *    message can never end up "half stored": either everything about it is
  *    durably recorded, or nothing is. If the D1 batch fails for any reason
- *    after R2 uploads already succeeded, those R2 objects are deleted
+ *    after B2 uploads already succeeded, those objects are deleted
  *    (best-effort) so they don't become permanent orphans.
  *
  *  - Idempotency: retried delivery of a message this mailbox already has
@@ -118,7 +119,7 @@ export async function handleIncomingEmail(
   // already been stored — almost always a retried delivery after an earlier
   // transient failure further down this same function — treat it as an
   // already-successful no-op. Checked before doing any parsing-adjacent
-  // work like R2 uploads, to avoid redundant work on every retry.
+  // work like storage uploads, to avoid redundant work on every retry.
   if (parsed.messageId) {
     const existing = await getMessageByMailboxAndMessageId(env, mailbox.id, parsed.messageId);
     if (existing) {
@@ -144,7 +145,7 @@ export async function handleIncomingEmail(
     .filter((entry) => entry.validation.valid)
     .slice(0, config.maxAttachmentsPerMessage);
 
-  // --- R2 first -------------------------------------------------------
+  // --- B2 (object storage) first --------------------------------------
   // Upload every attachment's bytes before touching D1 at all. If any
   // upload fails partway through, clean up whatever succeeded in this
   // attempt and rethrow (transient — no D1 rows exist yet, so a retry from
@@ -154,21 +155,19 @@ export async function handleIncomingEmail(
 
   try {
     for (const { attachment, validation } of validAttachments) {
-      const r2Key = buildAttachmentR2Key(mailbox.id, parsed.messageId ?? "no-message-id");
-      await env.ATTACHMENTS.put(r2Key, attachment.content, {
-        httpMetadata: { contentType: attachment.contentType },
-      });
-      uploadedKeys.push(r2Key);
+      const objectKey = buildAttachmentR2Key(mailbox.id, parsed.messageId ?? "no-message-id");
+      await putStoredObject(env, objectKey, attachment.content, attachment.contentType);
+      uploadedKeys.push(objectKey);
       attachmentInputs.push({
         messageId: "", // unused placeholder — createMessageWithAttachments assigns the real message id
         filename: validation.sanitizedFilename ?? "attachment",
         contentType: attachment.contentType,
         sizeBytes: attachment.sizeBytes,
-        r2Key,
+        r2Key: objectKey,
       });
     }
   } catch (err) {
-    await bestEffortDeleteR2Objects(env, uploadedKeys, "r2-upload-failed");
+    await bestEffortDeleteStorageObjects(env, uploadedKeys, "b2-upload-failed");
     throw err; // transient — let Cloudflare retry
   }
 
@@ -196,7 +195,7 @@ export async function handleIncomingEmail(
       // the last slot before this one's D1 write landed — the trigger is
       // the authoritative backstop for exactly this race. Clean up this
       // attempt's uploads and bounce, same as the fast-path case.
-      await bestEffortDeleteR2Objects(env, uploadedKeys, "mailbox-full-after-upload");
+      await bestEffortDeleteStorageObjects(env, uploadedKeys, "mailbox-full-after-upload");
       message.setReject("Mailbox is full.");
       return;
     }
@@ -205,12 +204,12 @@ export async function handleIncomingEmail(
       // message between our idempotency check above and this write. This
       // attempt's uploads are redundant duplicates of already-stored
       // content — remove them and treat this as a successful no-op.
-      await bestEffortDeleteR2Objects(env, uploadedKeys, "duplicate-after-upload");
+      await bestEffortDeleteStorageObjects(env, uploadedKeys, "duplicate-after-upload");
       return;
     }
     // Genuinely unexpected — clean up this attempt's uploads and propagate
     // so Cloudflare treats this delivery as failed and retries it.
-    await bestEffortDeleteR2Objects(env, uploadedKeys, "d1-write-failed");
+    await bestEffortDeleteStorageObjects(env, uploadedKeys, "d1-write-failed");
     throw err;
   }
 
@@ -218,23 +217,23 @@ export async function handleIncomingEmail(
 }
 
 /**
- * Best-effort cleanup of R2 objects uploaded during an attempt that didn't
+ * Best-effort cleanup of B2 objects uploaded during an attempt that didn't
  * end up completing. "Best-effort" is doing real work here: if the delete
  * itself fails, we log it clearly (rather than silently swallowing) so an
- * orphaned R2 object is at least visible for manual/administrative cleanup,
+ * orphaned B2 object is at least visible for manual/administrative cleanup,
  * since true exactly-once cleanup across two independent storage systems
  * isn't achievable without a durable outbox log — a deliberate, documented
  * trade-off (see README "Known limitations").
  */
-async function bestEffortDeleteR2Objects(env: Env, keys: string[], reason: string): Promise<void> {
+async function bestEffortDeleteStorageObjects(env: Env, keys: string[], reason: string): Promise<void> {
   if (keys.length === 0) return;
   try {
-    await env.ATTACHMENTS.delete(keys);
+    await deleteStoredObjects(env, keys);
   } catch (cleanupErr) {
     console.error(JSON.stringify({
       level: "error",
       job: "email-handler",
-      event: "r2-compensation-failed",
+      event: "b2-compensation-failed",
       reason,
       keyCount: keys.length,
       message: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),

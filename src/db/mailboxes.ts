@@ -1,5 +1,6 @@
 import type { Env, MailboxRow } from "../types/index.js";
 import { generateMailboxId } from "../lib/token.js";
+import { deleteStoredObjects } from "../lib/b2.js";
 import type { UniquenessChecker } from "../lib/username-generator.js";
 
 export class MailboxAddressTakenError extends Error {
@@ -93,9 +94,9 @@ export async function touchMailboxActivity(env: Env, id: string): Promise<void> 
 
 /**
  * Delete a mailbox and everything under it: messages, attachment metadata,
- * and the corresponding R2 objects. Messages/attachments cascade at the D1
- * level via ON DELETE CASCADE, but R2 objects must be removed explicitly
- * since R2 has no knowledge of D1 foreign keys.
+ * and the corresponding objects in Backblaze B2. Messages/attachments
+ * cascade at the D1 level via ON DELETE CASCADE, but B2 objects must be
+ * removed explicitly since B2 has no knowledge of D1 foreign keys.
  */
 export async function deleteMailboxCascade(env: Env, mailboxId: string): Promise<void> {
   const attachmentRows = await env.DB.prepare(
@@ -108,20 +109,10 @@ export async function deleteMailboxCascade(env: Env, mailboxId: string): Promise
     .all<{ r2_key: string }>();
 
   const keys = (attachmentRows.results ?? []).map((r) => r.r2_key);
-  await deleteR2ObjectsInBatches(env, keys);
+  await deleteStoredObjects(env, keys);
 
   // ON DELETE CASCADE removes messages and attachments rows automatically.
   await env.DB.prepare(`DELETE FROM mailboxes WHERE id = ?`).bind(mailboxId).run();
-}
-
-/** R2 supports deleting up to 1000 keys per call; batch defensively below that. */
-async function deleteR2ObjectsInBatches(env: Env, keys: string[], batchSize = 100): Promise<void> {
-  for (let i = 0; i < keys.length; i += batchSize) {
-    const batch = keys.slice(i, i + batchSize);
-    if (batch.length > 0) {
-      await env.ATTACHMENTS.delete(batch);
-    }
-  }
 }
 
 /** Adapter so the username generator's collision-retry loop can query D1 directly. */

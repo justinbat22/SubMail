@@ -26,7 +26,7 @@ async function createAutoMailbox(): Promise<MailboxCreatedDto> {
 describe("POST /api/mailbox (auto-generated)", () => {
   it("creates a mailbox with a human-looking address and a token", async () => {
     const mailbox = await createAutoMailbox();
-    expect(mailbox.address).toMatch(/^[a-z0-9.]+@example\.com$/);
+    expect(mailbox.address).toMatch(new RegExp(`^[a-z0-9.]+@${env.EMAIL_DOMAIN.replace(/\./g, "\\.")}$`));
     expect(mailbox.token.length).toBeGreaterThan(20);
     expect(mailbox.id).toMatch(/^[0-9a-f]{32}$/);
   });
@@ -47,7 +47,7 @@ describe("POST /api/mailbox (custom local-part)", () => {
     });
     expect(res.status).toBe(201);
     const body = (await res.json()) as { success: true; data: MailboxCreatedDto };
-    expect(body.data.address).toBe("mytest123@example.com");
+    expect(body.data.address).toBe(`mytest123@${env.EMAIL_DOMAIN}`);
   });
 
   it("rejects a reserved local-part", async () => {

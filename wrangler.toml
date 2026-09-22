@@ -17,6 +17,11 @@ MAX_ATTACHMENTS_PER_MESSAGE = "10"
 MAX_MESSAGES_PER_MAILBOX = "200"
 CLEANUP_BATCH_SIZE = "50"
 
+# Backblaze B2 attachment storage (non-secret parts; B2_KEY_ID and
+# B2_APPLICATION_KEY are secrets set via `wrangler secret put`).
+B2_REGION = "us-east-005"
+B2_BUCKET = "tempmail-attachments"
+
 # ---------------------------------------------------------------------------
 # D1 database binding.
 # Create with: npx wrangler d1 create tempmail-db
@@ -29,12 +34,19 @@ database_id = "e8708351-7e90-45db-ad39-a4ba5394c247"
 migrations_dir = "migrations"
 
 # ---------------------------------------------------------------------------
-# R2 bucket binding for attachments.
-# Create with: npx wrangler r2 bucket create tempmail-attachments
+# Backblaze B2 attachment storage.
+# Create a private bucket and a dedicated app key in the Backblaze console:
+#   1. Buckets → Create Bucket (Private).
+#   2. Application Keys → Add a New Application Key — restrict it to that
+#      bucket, with capabilities: readFiles, writeFiles, deleteFiles
+#      (deleteFiles + writeFiles are both needed for Delete Objects).
+#      Note: the master account key does NOT work with the S3-Compatible API.
+# Then set these as Worker secrets/vars (NOT here — they are credentials):
+#   npx wrangler secret put B2_KEY_ID           # the app key's keyID
+#   npx wrangler secret put B2_APPLICATION_KEY  # the app key itself
+# B2_REGION/B2_BUCKET are non-secret and belong in [vars] below
+# (B2_REGION example: "us-east-005" — shown in the bucket's Endpoint).
 # ---------------------------------------------------------------------------
-[[r2_buckets]]
-binding = "ATTACHMENTS"
-bucket_name = "tempmail-attachments"
 
 # ---------------------------------------------------------------------------
 # Static frontend assets (public/index.html, app.js, styles.css). Served
@@ -78,6 +90,8 @@ MAX_ATTACHMENT_SIZE = "5242880"
 MAX_ATTACHMENTS_PER_MESSAGE = "10"
 MAX_MESSAGES_PER_MAILBOX = "200"
 CLEANUP_BATCH_SIZE = "50"
+B2_REGION = "us-east-005"
+B2_BUCKET = "tempmail-attachments-staging"
 
 [[env.staging.d1_databases]]
 binding = "DB"
@@ -85,6 +99,4 @@ database_name = "tempmail-db-staging"
 database_id = "REPLACE_WITH_YOUR_STAGING_D1_DATABASE_ID"
 migrations_dir = "migrations"
 
-[[env.staging.r2_buckets]]
-binding = "ATTACHMENTS"
-bucket_name = "tempmail-attachments-staging"
+# Staging uses its own B2 bucket + dedicated staging app key (secret).

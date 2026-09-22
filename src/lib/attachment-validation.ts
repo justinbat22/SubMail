@@ -2,12 +2,12 @@
  * Attachment validation. Filenames in incoming MIME are fully
  * attacker-controlled — this module strips anything that could be used for
  * path traversal, null-byte tricks, or absurd lengths before a filename is
- * ever used to build an R2 key or shown back to a user.
+ * ever used to build a storage key or shown back to a user.
  *
- * Note: the R2 object key itself never incorporates the filename (see
- * `buildAttachmentR2Key` in src/db/messages.ts) — it's random-ID-based. The
- * sanitized filename here is only for the metadata we store and later show
- * to the mailbox owner and set as the download's Content-Disposition.
+ * Note: the object-storage (B2) key itself never incorporates the filename
+ * (see `buildAttachmentR2Key` in src/db/messages.ts) — it's random-ID-based.
+ * The sanitized filename here is only for the metadata we store and later
+ * show to the mailbox owner and set as the download's Content-Disposition.
  */
 
 const MAX_FILENAME_LENGTH = 255;
