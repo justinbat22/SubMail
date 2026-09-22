@@ -1,69 +1,19 @@
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { env, SELF } from "cloudflare:test";
-// Vite's `?raw` suffix inlines the file's contents as a string at build
-// time. This runs inside the actual Workers runtime (workerd), which has no
-// Node `fs` module, so migrations can't be read from disk at test time —
-// this is the same schema that ships to production, just bundled in.
-import initialMigrationSql from "../migrations/0001_initial.sql?raw";
-import rateLimitsMigrationSql from "../migrations/0002_rate_limits.sql?raw";
 import type { MailboxCreatedDto } from "../src/types/index.js";
+import { applyAllMigrations, resetAllTables } from "./helpers/migrate.js";
 
 // `env` and `SELF` are provided by @cloudflare/vitest-pool-workers, wired to
 // the bindings declared in wrangler.toml + vitest.config.ts. `SELF` routes
 // requests through the actual exported `fetch` handler (src/index.ts),
 // exercising the real Hono app, middleware, and security headers.
 
-declare module "cloudflare:test" {
-  interface ProvidedEnv {
-    DB: D1Database;
-    ATTACHMENTS: R2Bucket;
-    EMAIL_DOMAIN: string;
-    APP_URL: string;
-    MAILBOX_TTL_HOURS: string;
-    MAX_MESSAGE_SIZE: string;
-    MAX_ATTACHMENT_SIZE: string;
-    MAX_ATTACHMENTS_PER_MESSAGE: string;
-    MAX_MESSAGES_PER_MAILBOX: string;
-    CLEANUP_BATCH_SIZE: string;
-  }
-}
-
-/**
- * Apply the real migration SQL to the simulated D1 instance, so these tests
- * run against the exact schema that ships to production rather than a
- * hand-maintained test-only copy.
- *
- * Comments are stripped line-by-line *before* splitting on ";", since a
- * comment can itself contain a semicolon (as several of ours do) — splitting
- * first would otherwise chop a comment mid-sentence into a bogus "statement".
- */
-async function applyMigrationSql(sql: string): Promise<void> {
-  const withoutComments = sql
-    .split("\n")
-    .map((line) => (line.trim().startsWith("--") ? "" : line))
-    .join("\n");
-
-  const statements = withoutComments
-    .split(";")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-
-  for (const statement of statements) {
-    await env.DB.prepare(statement).run();
-  }
-}
-
 beforeAll(async () => {
-  await applyMigrationSql(initialMigrationSql);
-  await applyMigrationSql(rateLimitsMigrationSql);
+  await applyAllMigrations(env.DB);
 });
 
 beforeEach(async () => {
-  // Reset tables between tests for isolation.
-  await env.DB.exec("DELETE FROM attachments;");
-  await env.DB.exec("DELETE FROM messages;");
-  await env.DB.exec("DELETE FROM mailboxes;");
-  await env.DB.exec("DELETE FROM rate_limits;");
+  await resetAllTables(env.DB);
 });
 
 async function createAutoMailbox(): Promise<MailboxCreatedDto> {

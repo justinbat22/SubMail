@@ -13,6 +13,7 @@ import { generateMailboxToken, hashToken } from "../lib/token.js";
 import { generateUniqueUsername, UsernameCollisionError } from "../lib/username-generator.js";
 import { buildAddress, normalizeLocalPart, validateCustomLocalPart } from "../lib/validation.js";
 import { actorKeyFromRequest, checkRateLimit, RATE_LIMITS } from "../lib/rate-limit.js";
+import { parseOptionalJsonObject } from "../lib/request-body.js";
 
 export const mailboxRoutes = new Hono<{ Bindings: Env }>();
 
@@ -34,18 +35,18 @@ mailboxRoutes.post("/", async (c) => {
 
   const config = loadConfig(c.env);
 
+  const bodyResult = await parseOptionalJsonObject(c.req.raw);
+  if (!bodyResult.ok) {
+    return apiError("INVALID_REQUEST", bodyResult.message);
+  }
+
   let requestedLocalPart: string | undefined;
-  try {
-    const body = await c.req.json().catch(() => ({}));
-    if (body && typeof body === "object" && "localPart" in body) {
-      const value = (body as Record<string, unknown>).localPart;
-      if (value !== undefined && typeof value !== "string") {
-        return apiError("INVALID_REQUEST", "localPart must be a string.");
-      }
-      requestedLocalPart = value as string | undefined;
+  if ("localPart" in bodyResult.value) {
+    const value = bodyResult.value.localPart;
+    if (value !== undefined && typeof value !== "string") {
+      return apiError("INVALID_REQUEST", "localPart must be a string.");
     }
-  } catch {
-    return apiError("INVALID_REQUEST", "Invalid JSON body.");
+    requestedLocalPart = value as string | undefined;
   }
 
   let localPart: string;

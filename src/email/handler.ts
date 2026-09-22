@@ -4,8 +4,11 @@ import { getMailboxByAddress, touchMailboxActivity } from "../db/mailboxes.js";
 import {
   buildAttachmentR2Key,
   countMessagesForMailbox,
-  createAttachment,
-  createMessage,
+  createMessageWithAttachments,
+  getMessageByMailboxAndMessageId,
+  MailboxFullError,
+  DuplicateMessageError,
+  type CreateAttachmentInput,
 } from "../db/messages.js";
 import { parseRawEmail, EmailParseError } from "./parser.js";
 import { validateAttachment } from "../lib/attachment-validation.js";
@@ -15,25 +18,50 @@ import { normalizeLocalPart } from "../lib/validation.js";
  * Handles one incoming message delivered by Cloudflare Email Routing.
  *
  * Design notes (see README "Email receiving" for the full write-up):
+ *
  *  - `message.to` is the *envelope* recipient Cloudflare's routing already
  *    matched to invoke this Worker — it is authoritative for mailbox lookup.
  *    Parsed `To`/`Cc` headers are attacker-controlled and are never used for
  *    routing decisions, only stored as display metadata.
- *  - An unknown recipient is *not* an error: per the spec, we must not
- *    auto-create a mailbox, must not store anything, and must return
- *    success to the mail infrastructure (i.e. just return normally without
- *    calling setReject/forward — Cloudflare treats a normal return as
- *    accepted-and-handled).
+ *
+ *  - An unknown recipient is *not* an error: we must not auto-create a
+ *    mailbox, must not store anything, and must return success to the mail
+ *    infrastructure (i.e. just return normally — Cloudflare treats a normal
+ *    return as accepted-and-handled).
+ *
  *  - Oversized messages and mailboxes at their message-count cap are
- *    rejected with `setReject`, which causes a permanent SMTP-level bounce
- *    back to the sender — the same behavior a real, capacity-limited mail
- *    server would exhibit, and cheaper than parsing first.
- *  - Attachment failures (individual attachment too large, or too many
- *    attachments) never fail the whole message: the message and any valid
- *    attachments are still stored, and offending attachments are simply
- *    dropped. This mirrors how real mail providers commonly handle
- *    oversized inline content, and avoids losing an otherwise-deliverable
- *    message over one bad part.
+ *    rejected with `setReject`, a permanent SMTP-level bounce — the same
+ *    behavior a real, capacity-limited mail server would exhibit. The count
+ *    check here is a fast *pre-check* only (avoids wasted parsing/upload
+ *    work for an obviously-full mailbox); the actual, race-safe enforcement
+ *    is the database trigger in migrations/0003_mailbox_message_limit.sql,
+ *    handled below via MailboxFullError.
+ *
+ *  - PERMANENT vs TRANSIENT failures are handled differently on purpose:
+ *      - Permanent (malformed MIME, mailbox full, message too large, unknown
+ *        recipient, duplicate/already-processed delivery): handled here,
+ *        function returns normally (with setReject for the bounce cases).
+ *        These are never retried, because retrying would never succeed.
+ *      - Transient (an R2 upload failure, an unexpected D1 error): this
+ *        function lets the error propagate. The `email()` entrypoint in
+ *        src/index.ts does NOT catch-and-swallow these — an uncaught
+ *        exception here causes Cloudflare to treat the delivery as failed,
+ *        which is what lets the sending MTA's normal retry behavior kick
+ *        in. Silently swallowing these would otherwise cause a message to
+ *        vanish forever after a purely transient infrastructure hiccup.
+ *
+ *  - R2 objects are uploaded BEFORE any D1 row is written, and the D1
+ *    message row + all its attachment rows are written together in a single
+ *    atomic batch (see createMessageWithAttachments). This ordering means a
+ *    message can never end up "half stored": either everything about it is
+ *    durably recorded, or nothing is. If the D1 batch fails for any reason
+ *    after R2 uploads already succeeded, those R2 objects are deleted
+ *    (best-effort) so they don't become permanent orphans.
+ *
+ *  - Idempotency: retried delivery of a message this mailbox already has
+ *    (same Message-ID) is detected via a UNIQUE(mailbox_id, message_id)
+ *    index and treated as a successful no-op rather than creating a
+ *    duplicate — see DuplicateMessageError handling below.
  */
 export async function handleIncomingEmail(
   message: ForwardableEmailMessage,
@@ -77,53 +105,141 @@ export async function handleIncomingEmail(
     parsed = await parseRawEmail(raw);
   } catch (err) {
     if (err instanceof EmailParseError) {
-      // Malformed MIME: safely discard rather than storing garbage or
-      // crashing. This is a deliberate trade-off — a real mail server would
-      // often still accept a malformed message, but here there's nothing
-      // safe to show the user for content we couldn't parse.
+      // Malformed/pathological MIME: permanent condition, safely discard
+      // rather than storing garbage, retrying forever, or spending unbounded
+      // CPU on it. Never retried.
       console.error(JSON.stringify({ level: "error", job: "email-parse", message: err.message }));
       return;
     }
     throw err;
   }
 
+  // Idempotency short-circuit: if this exact (mailbox, Message-ID) has
+  // already been stored — almost always a retried delivery after an earlier
+  // transient failure further down this same function — treat it as an
+  // already-successful no-op. Checked before doing any parsing-adjacent
+  // work like R2 uploads, to avoid redundant work on every retry.
+  if (parsed.messageId) {
+    const existing = await getMessageByMailboxAndMessageId(env, mailbox.id, parsed.messageId);
+    if (existing) {
+      console.log(JSON.stringify({
+        level: "info",
+        job: "email-handler",
+        event: "duplicate-delivery-skipped",
+        mailboxId: mailbox.id,
+      }));
+      return;
+    }
+  }
+
   const validAttachments = parsed.attachments
-    .map((a) => ({ attachment: a, validation: validateAttachment({
-      filename: a.filename,
-      sizeBytes: a.sizeBytes,
-      maxAttachmentSize: config.maxAttachmentSize,
-    }) }))
+    .map((a) => ({
+      attachment: a,
+      validation: validateAttachment({
+        filename: a.filename,
+        sizeBytes: a.sizeBytes,
+        maxAttachmentSize: config.maxAttachmentSize,
+      }),
+    }))
     .filter((entry) => entry.validation.valid)
     .slice(0, config.maxAttachmentsPerMessage);
 
-  const stored = await createMessage(env, {
-    mailboxId: mailbox.id,
-    messageId: parsed.messageId,
-    senderName: parsed.senderName,
-    senderAddress: parsed.senderAddress,
-    recipientAddress,
-    subject: parsed.subject,
-    textBody: parsed.textBody,
-    htmlBody: parsed.htmlBody,
-    sizeBytes: message.rawSize,
-    hasAttachments: validAttachments.length > 0,
-  });
+  // --- R2 first -------------------------------------------------------
+  // Upload every attachment's bytes before touching D1 at all. If any
+  // upload fails partway through, clean up whatever succeeded in this
+  // attempt and rethrow (transient — no D1 rows exist yet, so a retry from
+  // scratch is safe and won't create duplicates or partial state).
+  const uploadedKeys: string[] = [];
+  const attachmentInputs: CreateAttachmentInput[] = [];
 
-  for (const { attachment, validation } of validAttachments) {
-    const r2Key = buildAttachmentR2Key(mailbox.id, stored.id);
-    await env.ATTACHMENTS.put(r2Key, attachment.content, {
-      httpMetadata: { contentType: attachment.contentType },
-    });
-    await createAttachment(env, {
-      messageId: stored.id,
-      filename: validation.sanitizedFilename ?? "attachment",
-      contentType: attachment.contentType,
-      sizeBytes: attachment.sizeBytes,
-      r2Key,
-    });
+  try {
+    for (const { attachment, validation } of validAttachments) {
+      const r2Key = buildAttachmentR2Key(mailbox.id, parsed.messageId ?? "no-message-id");
+      await env.ATTACHMENTS.put(r2Key, attachment.content, {
+        httpMetadata: { contentType: attachment.contentType },
+      });
+      uploadedKeys.push(r2Key);
+      attachmentInputs.push({
+        messageId: "", // unused placeholder — createMessageWithAttachments assigns the real message id
+        filename: validation.sanitizedFilename ?? "attachment",
+        contentType: attachment.contentType,
+        sizeBytes: attachment.sizeBytes,
+        r2Key,
+      });
+    }
+  } catch (err) {
+    await bestEffortDeleteR2Objects(env, uploadedKeys, "r2-upload-failed");
+    throw err; // transient — let Cloudflare retry
+  }
+
+  // --- Then D1, atomically ---------------------------------------------
+  try {
+    await createMessageWithAttachments(
+      env,
+      {
+        mailboxId: mailbox.id,
+        messageId: parsed.messageId,
+        senderName: parsed.senderName,
+        senderAddress: parsed.senderAddress,
+        recipientAddress,
+        subject: parsed.subject,
+        textBody: parsed.textBody,
+        htmlBody: parsed.htmlBody,
+        sizeBytes: message.rawSize,
+        hasAttachments: attachmentInputs.length > 0,
+      },
+      attachmentInputs
+    );
+  } catch (err) {
+    if (err instanceof MailboxFullError) {
+      // The fast pre-check above passed, but a concurrent delivery filled
+      // the last slot before this one's D1 write landed — the trigger is
+      // the authoritative backstop for exactly this race. Clean up this
+      // attempt's uploads and bounce, same as the fast-path case.
+      await bestEffortDeleteR2Objects(env, uploadedKeys, "mailbox-full-after-upload");
+      message.setReject("Mailbox is full.");
+      return;
+    }
+    if (err instanceof DuplicateMessageError) {
+      // Another (likely retried) delivery already stored this exact
+      // message between our idempotency check above and this write. This
+      // attempt's uploads are redundant duplicates of already-stored
+      // content — remove them and treat this as a successful no-op.
+      await bestEffortDeleteR2Objects(env, uploadedKeys, "duplicate-after-upload");
+      return;
+    }
+    // Genuinely unexpected — clean up this attempt's uploads and propagate
+    // so Cloudflare treats this delivery as failed and retries it.
+    await bestEffortDeleteR2Objects(env, uploadedKeys, "d1-write-failed");
+    throw err;
   }
 
   await touchMailboxActivity(env, mailbox.id);
+}
+
+/**
+ * Best-effort cleanup of R2 objects uploaded during an attempt that didn't
+ * end up completing. "Best-effort" is doing real work here: if the delete
+ * itself fails, we log it clearly (rather than silently swallowing) so an
+ * orphaned R2 object is at least visible for manual/administrative cleanup,
+ * since true exactly-once cleanup across two independent storage systems
+ * isn't achievable without a durable outbox log — a deliberate, documented
+ * trade-off (see README "Known limitations").
+ */
+async function bestEffortDeleteR2Objects(env: Env, keys: string[], reason: string): Promise<void> {
+  if (keys.length === 0) return;
+  try {
+    await env.ATTACHMENTS.delete(keys);
+  } catch (cleanupErr) {
+    console.error(JSON.stringify({
+      level: "error",
+      job: "email-handler",
+      event: "r2-compensation-failed",
+      reason,
+      keyCount: keys.length,
+      message: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+    }));
+  }
 }
 
 function normalizeRecipient(envelopeTo: string): string {

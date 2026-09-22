@@ -1,6 +1,16 @@
 import PostalMime from "postal-mime";
 import type { Email as ParsedEmail, Attachment as ParsedAttachment } from "postal-mime";
 import { sanitizeEmailHtml } from "../lib/html-sanitize.js";
+import {
+  assertMimeStructureWithinLimits,
+  withParseTimeout,
+  truncate,
+  DEFAULT_MIME_GUARD_LIMITS,
+  MimeStructureLimitError,
+  MAX_SUBJECT_LENGTH,
+  MAX_SENDER_NAME_LENGTH,
+  type MimeGuardLimits,
+} from "../lib/mime-guards.js";
 
 export interface NormalizedAttachment {
   filename: string | null;
@@ -29,29 +39,52 @@ export class EmailParseError extends Error {
 /**
  * Parse a raw RFC 5322 message into a normalized, application-level shape.
  *
- * Deliberately conservative about what it trusts from the parsed structure:
- * headers, subject, and body are all attacker-controlled and are passed
- * through as inert data (strings stored in D1, never executed), with HTML
- * additionally passed through the defense-in-depth sanitizer. Parsing
- * failures are caught and surfaced as a typed error rather than throwing a
- * raw exception into the email() handler, so a malformed message can be
- * safely discarded instead of crashing message processing.
+ * Untrusted-input hardening, in order:
+ *  1. Cheap structural pre-checks on the raw bytes (header block size, MIME
+ *     part count, nested-message count) — see src/lib/mime-guards.ts for
+ *     why these exist: postal-mime itself exposes no such limits.
+ *  2. The actual parse is raced against a wall-clock timeout, so even an
+ *     input that passed the structural pre-checks but still triggers
+ *     pathological parse time is bounded rather than eating the Worker's
+ *     entire CPU budget.
+ *  3. Extracted text fields are treated as inert data (strings stored in
+ *     D1, never executed) and length-capped; HTML additionally goes through
+ *     the defense-in-depth sanitizer.
+ *
+ * Any failure at any of these stages — structural rejection, timeout, or a
+ * genuine postal-mime parse exception — is surfaced as the single
+ * EmailParseError type, so callers have exactly one failure mode to handle
+ * (safe discard), not several.
  */
-export async function parseRawEmail(raw: Uint8Array): Promise<NormalizedEmail> {
+export async function parseRawEmail(
+  raw: Uint8Array,
+  limits: MimeGuardLimits = DEFAULT_MIME_GUARD_LIMITS
+): Promise<NormalizedEmail> {
+  try {
+    assertMimeStructureWithinLimits(raw, limits);
+  } catch (err) {
+    if (err instanceof MimeStructureLimitError) {
+      throw new EmailParseError(err.message, err);
+    }
+    throw err;
+  }
+
   let parsed: ParsedEmail;
   try {
-    parsed = await PostalMime.parse(raw);
+    parsed = await withParseTimeout(PostalMime.parse(raw), limits.parseTimeoutMs);
   } catch (err) {
     throw new EmailParseError("Failed to parse MIME message.", err);
   }
 
   const sender = parsed.from;
+  const subject = parsed.subject ? truncate(parsed.subject, MAX_SUBJECT_LENGTH) : null;
+  const senderName = sender?.name?.trim() ? truncate(sender.name.trim(), MAX_SENDER_NAME_LENGTH) : null;
 
   return {
     messageId: parsed.messageId ?? null,
-    senderName: sender?.name?.trim() || null,
+    senderName,
     senderAddress: sender?.address?.trim().toLowerCase() || null,
-    subject: parsed.subject ?? null,
+    subject,
     textBody: parsed.text ?? null,
     htmlBody: parsed.html ? sanitizeEmailHtml(parsed.html) : null,
     attachments: parsed.attachments.map(normalizeAttachment),

@@ -14,7 +14,23 @@ const MAX_FILENAME_LENGTH = 255;
 const FALLBACK_FILENAME = "attachment";
 
 /** Extensions that must never be offered for direct browser execution/preview risk. */
-const DOUBLE_EXTENSION_RISK_PATTERN = /\.(html?|svg|xml|xhtml)$/i;
+const DOUBLE_EXTENSION_RISK_PATTERN = /\.(html?|svg|xml|xhtml|js|mjs)$/i;
+
+/**
+ * Declared content-types that browsers may render or execute inline rather
+ * than download, regardless of what the filename's extension claims. A
+ * sender can name a file "invoice.pdf" while declaring
+ * `Content-Type: text/html` — the extension check alone wouldn't catch that.
+ */
+const RISKY_CONTENT_TYPES = new Set([
+  "text/html",
+  "application/xhtml+xml",
+  "image/svg+xml",
+  "application/javascript",
+  "text/javascript",
+  "application/ecmascript",
+  "text/ecmascript",
+]);
 
 export interface AttachmentValidationResult {
   valid: boolean;
@@ -86,10 +102,32 @@ export function validateAttachment(input: {
 
 /**
  * Whether a filename's extension is one that browsers may render/execute
- * inline rather than download (HTML, SVG with embedded script, XML). Used
- * only to decide response headers at download time (force a download rather
- * than an inline render) — it is not a basis for rejecting the attachment.
+ * inline rather than download (HTML, SVG with embedded script, XML, raw
+ * JavaScript). Used only to decide response headers at download time (force
+ * a download rather than an inline render) — it is not a basis for
+ * rejecting the attachment.
  */
 export function hasInlineRenderRiskExtension(filename: string): boolean {
   return DOUBLE_EXTENSION_RISK_PATTERN.test(filename);
+}
+
+/**
+ * Whether a declared content-type is one browsers may render/execute inline.
+ * Checked independently of the filename — see RISKY_CONTENT_TYPES above.
+ */
+export function hasRiskyContentType(contentType: string | null): boolean {
+  if (!contentType) return false;
+  // Content-Type headers can carry parameters (e.g. "text/html; charset=utf-8");
+  // only the type/subtype portion matters here.
+  const bare = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+  return RISKY_CONTENT_TYPES.has(bare);
+}
+
+/**
+ * Combines the extension- and content-type-based checks: true if either
+ * signal indicates the browser might try to render this inline rather than
+ * download it. This is what download-serving code should actually call.
+ */
+export function isRiskyForInlineRendering(filename: string, contentType: string | null): boolean {
+  return hasInlineRenderRiskExtension(filename) || hasRiskyContentType(contentType);
 }

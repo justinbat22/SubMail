@@ -96,4 +96,12 @@ export const RATE_LIMITS = {
   MAILBOX_DELETE: { bucket: "mailbox:delete", limit: 20, windowMs: 60 * 60 * 1000 } satisfies RateLimitConfig,
   MESSAGE_LIST: { bucket: "message:list", limit: 120, windowMs: 60 * 1000 } satisfies RateLimitConfig,
   ATTACHMENT_DOWNLOAD: { bucket: "attachment:download", limit: 60, windowMs: 60 * 1000 } satisfies RateLimitConfig,
+  /**
+   * Applied inside requireMailboxAuth itself (src/lib/auth.ts), so it covers
+   * every authenticated route uniformly — not just the routes that happen to
+   * add their own extra limit on top. This closes the gap where a route with
+   * no route-specific limit (e.g. GET /api/mailbox) would otherwise allow
+   * unlimited credential-guessing attempts.
+   */
+  AUTH_ATTEMPT: { bucket: "auth:attempt", limit: 60, windowMs: 60 * 1000 } satisfies RateLimitConfig,
 } as const;

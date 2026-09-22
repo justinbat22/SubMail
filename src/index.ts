@@ -58,11 +58,24 @@ export default {
         job: "email-handler",
         message: err instanceof Error ? err.message : "Unknown error",
       }));
-      // Do not rethrow: an unhandled exception here would surface as a
-      // transient SMTP failure to the sending MTA, which typically retries
-      // — potentially hammering the same failure repeatedly. Swallowing and
-      // logging is safer than an uncontrolled retry storm for a message we
-      // may never be able to process successfully anyway.
+      // Rethrow rather than swallow. handleIncomingEmail only ever lets an
+      // exception reach here for GENUINELY UNEXPECTED/TRANSIENT failures
+      // (an R2 upload error, an unexpected D1 error) — every PERMANENT,
+      // never-worth-retrying condition (unknown recipient, expired mailbox,
+      // oversized message, mailbox full, malformed MIME, already-processed
+      // duplicate) is handled inside handleIncomingEmail itself, which
+      // returns normally (or calls setReject) instead of throwing.
+      //
+      // An earlier version of this handler swallowed every exception here
+      // "to avoid a retry storm" — but that silently and permanently
+      // dropped mail whenever a purely transient infrastructure hiccup hit
+      // R2 or D1, with no way to ever recover it. Letting the exception
+      // propagate causes Cloudflare to treat the delivery as failed, which
+      // is what lets the sending MTA's normal (rate-limited, bounded) retry
+      // behavior actually recover the message — the retry storm concern is
+      // Cloudflare/the sending MTA's problem to bound, not a reason to
+      // silently discard mail we might have been able to store on a retry.
+      throw err;
     }
   },
 };

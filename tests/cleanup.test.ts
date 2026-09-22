@@ -1,36 +1,17 @@
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
-import initialMigrationSql from "../migrations/0001_initial.sql?raw";
-import rateLimitsMigrationSql from "../migrations/0002_rate_limits.sql?raw";
 import { createMailbox } from "../src/db/mailboxes.js";
 import { createMessage, createAttachment, buildAttachmentR2Key } from "../src/db/messages.js";
 import { hashToken, generateMailboxToken } from "../src/lib/token.js";
 import { runExpiredMailboxCleanup } from "../src/cleanup/expired-mailboxes.js";
-
-async function applyMigrationSql(sql: string): Promise<void> {
-  const withoutComments = sql
-    .split("\n")
-    .map((line) => (line.trim().startsWith("--") ? "" : line))
-    .join("\n");
-  const statements = withoutComments
-    .split(";")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  for (const statement of statements) {
-    await env.DB.prepare(statement).run();
-  }
-}
+import { applyAllMigrations, resetAllTables } from "./helpers/migrate.js";
 
 beforeAll(async () => {
-  await applyMigrationSql(initialMigrationSql);
-  await applyMigrationSql(rateLimitsMigrationSql);
+  await applyAllMigrations(env.DB);
 });
 
 beforeEach(async () => {
-  await env.DB.exec("DELETE FROM attachments;");
-  await env.DB.exec("DELETE FROM messages;");
-  await env.DB.exec("DELETE FROM mailboxes;");
-  await env.DB.exec("DELETE FROM rate_limits;");
+  await resetAllTables(env.DB);
 });
 
 /** Create a mailbox and force its expiry (or non-expiry) directly via SQL, for cleanup testing. */

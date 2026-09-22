@@ -16,19 +16,19 @@
     "db:migrate:remote": "wrangler d1 migrations apply tempmail-db --remote"
   },
   "dependencies": {
-    "hono": "^4.6.0",
-    "postal-mime": "^2.2.0"
+    "hono": "^4.13.0",
+    "postal-mime": "^3.0.0"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.22.0",
-    "@cloudflare/workers-types": "^5.20260919.1",
+    "@cloudflare/vitest-pool-workers": "^0.12.0",
+    "@cloudflare/workers-types": "^4.20260702.0",
     "@eslint/js": "^9.0.0",
     "eslint": "^9.0.0",
     "typescript": "^5.5.0",
     "typescript-eslint": "^8.0.0",
-    "vitest": "^4.1.0",
-    "wrangler": "^4.135.0"
-    },
+    "vitest": "^3.2.0",
+    "wrangler": "4.72.0"
+  },
   "engines": {
     "node": ">=18.0.0"
   }

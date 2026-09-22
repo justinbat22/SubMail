@@ -1,34 +1,15 @@
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { env, SELF, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
-import initialMigrationSql from "../migrations/0001_initial.sql?raw";
-import rateLimitsMigrationSql from "../migrations/0002_rate_limits.sql?raw";
 import worker from "../src/index.js";
 import type { MailboxCreatedDto, MessageDetailDto, MessageSummaryDto } from "../src/types/index.js";
-
-async function applyMigrationSql(sql: string): Promise<void> {
-  const withoutComments = sql
-    .split("\n")
-    .map((line) => (line.trim().startsWith("--") ? "" : line))
-    .join("\n");
-  const statements = withoutComments
-    .split(";")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  for (const statement of statements) {
-    await env.DB.prepare(statement).run();
-  }
-}
+import { applyAllMigrations, resetAllTables } from "./helpers/migrate.js";
 
 beforeAll(async () => {
-  await applyMigrationSql(initialMigrationSql);
-  await applyMigrationSql(rateLimitsMigrationSql);
+  await applyAllMigrations(env.DB);
 });
 
 beforeEach(async () => {
-  await env.DB.exec("DELETE FROM attachments;");
-  await env.DB.exec("DELETE FROM messages;");
-  await env.DB.exec("DELETE FROM mailboxes;");
-  await env.DB.exec("DELETE FROM rate_limits;");
+  await resetAllTables(env.DB);
 });
 
 async function createAutoMailbox(): Promise<MailboxCreatedDto> {
@@ -91,6 +72,26 @@ describe("Rate limiting", () => {
 
     const checkRes = await SELF.fetch("https://app.example.com/api/mailbox/check?localPart=stillworks");
     expect(checkRes.status).toBe(200);
+  });
+
+  it("resets once the current window elapses, rather than blocking permanently", async () => {
+    // Trip the limit for the check endpoint.
+    let tripped = false;
+    for (let i = 0; i < 100 && !tripped; i++) {
+      const res = await SELF.fetch(`https://app.example.com/api/mailbox/check?localPart=windowtest${i}`);
+      if (res.status === 429) tripped = true;
+    }
+    expect(tripped).toBe(true);
+
+    // Simulate the window having elapsed: push every existing rate_limits
+    // row for this bucket far into the past. A fresh request computes its
+    // OWN window_start from the real current time, which will no longer
+    // match these now-stale rows — it lands in a brand new window with a
+    // fresh count, exactly as if real wall-clock time had actually passed.
+    await env.DB.prepare("UPDATE rate_limits SET window_start = 0 WHERE key LIKE 'mailbox:check:%'").run();
+
+    const afterReset = await SELF.fetch("https://app.example.com/api/mailbox/check?localPart=freshwindow");
+    expect(afterReset.status).toBe(200);
   });
 });
 
@@ -263,5 +264,99 @@ describe("End-to-end XSS and injection payloads", () => {
       body: JSON.stringify({ localPart: '"><script>alert(1)</script>' }),
     });
     expect(res.status).toBe(400);
+  });
+});
+
+describe("Cross-mailbox authorization matrix", () => {
+  async function createAutoMailbox(): Promise<MailboxCreatedDto> {
+    const res = await SELF.fetch("https://app.example.com/api/mailbox", { method: "POST" });
+    const body = (await res.json()) as { data: MailboxCreatedDto };
+    return body.data;
+  }
+
+  async function deliverPlainEmail(to: string, subject: string): Promise<void> {
+    const raw = [
+      `From: sender@outside.example`,
+      `To: ${to}`,
+      `Subject: ${subject}`,
+      `Content-Type: text/plain`,
+      ``,
+      `body`,
+      ``,
+    ].join("\r\n");
+    await deliverEmail(buildIncomingMessage({ from: "sender@outside.example", to, raw }));
+  }
+
+  it("mailbox A's own token can read mailbox A's message detail", async () => {
+    const mailboxA = await createAutoMailbox();
+    await deliverPlainEmail(mailboxA.address, "for-a");
+
+    const listRes = await SELF.fetch("https://app.example.com/api/mailbox/messages", {
+      headers: { Authorization: `Bearer ${mailboxA.token}`, "X-Mailbox-Id": mailboxA.id },
+    });
+    const listBody = (await listRes.json()) as { data: { messages: MessageSummaryDto[] } };
+    const messageId = listBody.data.messages[0]!.id;
+
+    const detailRes = await SELF.fetch(`https://app.example.com/api/mailbox/messages/${messageId}`, {
+      headers: { Authorization: `Bearer ${mailboxA.token}`, "X-Mailbox-Id": mailboxA.id },
+    });
+    expect(detailRes.status).toBe(200);
+  });
+
+  it("mailbox B's token CANNOT read mailbox A's message detail by ID", async () => {
+    const mailboxA = await createAutoMailbox();
+    const mailboxB = await createAutoMailbox();
+    await deliverPlainEmail(mailboxA.address, "for-a-not-b");
+
+    const listRes = await SELF.fetch("https://app.example.com/api/mailbox/messages", {
+      headers: { Authorization: `Bearer ${mailboxA.token}`, "X-Mailbox-Id": mailboxA.id },
+    });
+    const listBody = (await listRes.json()) as { data: { messages: MessageSummaryDto[] } };
+    const messageId = listBody.data.messages[0]!.id;
+
+    // Mailbox B, correctly authenticated as itself, tries to fetch mailbox A's message.
+    const crossRes = await SELF.fetch(`https://app.example.com/api/mailbox/messages/${messageId}`, {
+      headers: { Authorization: `Bearer ${mailboxB.token}`, "X-Mailbox-Id": mailboxB.id },
+    });
+    expect(crossRes.status).toBe(404); // not found, not "403 forbidden" — no confirmation the ID exists at all
+  });
+
+  it("mailbox B's token CANNOT delete mailbox A's message", async () => {
+    const mailboxA = await createAutoMailbox();
+    const mailboxB = await createAutoMailbox();
+    await deliverPlainEmail(mailboxA.address, "for-a-delete-test");
+
+    const listRes = await SELF.fetch("https://app.example.com/api/mailbox/messages", {
+      headers: { Authorization: `Bearer ${mailboxA.token}`, "X-Mailbox-Id": mailboxA.id },
+    });
+    const listBody = (await listRes.json()) as { data: { messages: MessageSummaryDto[] } };
+    const messageId = listBody.data.messages[0]!.id;
+
+    const crossDeleteRes = await SELF.fetch(`https://app.example.com/api/mailbox/messages/${messageId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${mailboxB.token}`, "X-Mailbox-Id": mailboxB.id },
+    });
+    expect(crossDeleteRes.status).toBe(404);
+
+    // Confirm it's still there for mailbox A, untouched by B's attempt.
+    const stillThereRes = await SELF.fetch(`https://app.example.com/api/mailbox/messages/${messageId}`, {
+      headers: { Authorization: `Bearer ${mailboxA.token}`, "X-Mailbox-Id": mailboxA.id },
+    });
+    expect(stillThereRes.status).toBe(200);
+  });
+
+  it("no token at all is rejected for every mailbox-scoped route", async () => {
+    const routes = [
+      { path: "/api/mailbox", method: "GET" },
+      { path: "/api/mailbox", method: "DELETE" },
+      { path: "/api/mailbox/messages", method: "GET" },
+      { path: `/api/mailbox/messages/${"a".repeat(32)}`, method: "GET" },
+      { path: `/api/mailbox/messages/${"a".repeat(32)}`, method: "DELETE" },
+      { path: `/api/attachments/${"a".repeat(32)}`, method: "GET" },
+    ];
+    for (const route of routes) {
+      const res = await SELF.fetch(`https://app.example.com${route.path}`, { method: route.method });
+      expect(res.status).toBe(401);
+    }
   });
 });

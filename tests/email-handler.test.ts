@@ -1,34 +1,15 @@
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { env, SELF, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
-import initialMigrationSql from "../migrations/0001_initial.sql?raw";
-import rateLimitsMigrationSql from "../migrations/0002_rate_limits.sql?raw";
 import worker from "../src/index.js";
 import type { MailboxCreatedDto, MessageDetailDto, MessageSummaryDto } from "../src/types/index.js";
-
-async function applyMigrationSql(sql: string): Promise<void> {
-  const withoutComments = sql
-    .split("\n")
-    .map((line) => (line.trim().startsWith("--") ? "" : line))
-    .join("\n");
-  const statements = withoutComments
-    .split(";")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  for (const statement of statements) {
-    await env.DB.prepare(statement).run();
-  }
-}
+import { applyAllMigrations, resetAllTables } from "./helpers/migrate.js";
 
 beforeAll(async () => {
-  await applyMigrationSql(initialMigrationSql);
-  await applyMigrationSql(rateLimitsMigrationSql);
+  await applyAllMigrations(env.DB);
 });
 
 beforeEach(async () => {
-  await env.DB.exec("DELETE FROM attachments;");
-  await env.DB.exec("DELETE FROM messages;");
-  await env.DB.exec("DELETE FROM mailboxes;");
-  await env.DB.exec("DELETE FROM rate_limits;");
+  await resetAllTables(env.DB);
 });
 
 /** Minimal ForwardableEmailMessage test double, per @cloudflare/workers-types. */
@@ -94,7 +75,7 @@ async function deliverEmail(message: ForwardableEmailMessage): Promise<void> {
   await waitOnExecutionContext(ctx);
 }
 
-describe("email() handler — end to end", () => {
+describe("email() handler - end to end", () => {
   it("stores an incoming message and makes it readable via the API", async () => {
     const mailbox = await createAutoMailbox();
     const raw = buildRawEmail({ to: mailbox.address, subject: "Welcome!", body: "Thanks for signing up." });

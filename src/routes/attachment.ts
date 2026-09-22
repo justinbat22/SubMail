@@ -4,8 +4,9 @@ import { apiError } from "../lib/response.js";
 import { requireMailboxAuth } from "../lib/auth.js";
 import { getAttachmentForMailbox } from "../db/messages.js";
 import { actorKeyFromRequest, checkRateLimit, RATE_LIMITS } from "../lib/rate-limit.js";
-import { hasInlineRenderRiskExtension } from "../lib/attachment-validation.js";
+import { isRiskyForInlineRendering } from "../lib/attachment-validation.js";
 import { securityHeaders } from "../lib/security.js";
+import { isValidOpaqueId } from "../lib/validation.js";
 
 export const attachmentRoutes = new Hono<{ Bindings: Env }>();
 
@@ -17,9 +18,12 @@ export const attachmentRoutes = new Hono<{ Bindings: Env }>();
  * getAttachmentForMailbox, which joins through messages -> mailbox_id so an
  * ID from one mailbox can never be fetched using another mailbox's
  * credentials). Always served with `Content-Disposition: attachment` for
- * filetypes a browser might otherwise render inline (HTML, SVG, XML), since
- * an inline-rendered attacker-controlled HTML/SVG file served from our own
- * origin would defeat the sandboxed-iframe model used for message bodies.
+ * filetypes a browser might otherwise render inline (HTML, SVG, XML, JS —
+ * checked by BOTH filename extension and declared content-type, since a
+ * sender can name a file "invoice.pdf" while declaring
+ * Content-Type: text/html), since an inline-rendered attacker-controlled
+ * file served from our own origin would defeat the sandboxed-iframe model
+ * used for message bodies.
  */
 attachmentRoutes.get("/:id", requireMailboxAuth, async (c) => {
   const actorKey = await actorKeyFromRequest(c.req.raw, RATE_LIMITS.ATTACHMENT_DOWNLOAD.bucket);
@@ -30,8 +34,8 @@ attachmentRoutes.get("/:id", requireMailboxAuth, async (c) => {
 
   const mailbox = c.get("mailbox");
   const attachmentId = c.req.param("id");
-  if (!attachmentId) {
-    return apiError("INVALID_REQUEST", "Attachment id is required.");
+  if (!isValidOpaqueId(attachmentId)) {
+    return apiError("ATTACHMENT_NOT_FOUND", "Attachment not found.");
   }
 
   const attachment = await getAttachmentForMailbox(c.env, mailbox.id, attachmentId);
@@ -49,7 +53,7 @@ attachmentRoutes.get("/:id", requireMailboxAuth, async (c) => {
   }
 
   const headers = new Headers(securityHeaders());
-  const forceDownload = hasInlineRenderRiskExtension(attachment.filename);
+  const forceDownload = isRiskyForInlineRendering(attachment.filename, attachment.content_type);
   const contentType = forceDownload ? "application/octet-stream" : attachment.content_type ?? "application/octet-stream";
   headers.set("Content-Type", contentType);
   headers.set("Content-Length", String(attachment.size_bytes));

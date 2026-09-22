@@ -131,3 +131,98 @@ export function validateGeneratedLocalPart(localPart: string): ValidationResult 
 export function buildAddress(localPart: string, domain: string): string {
   return `${normalizeLocalPart(localPart)}@${domain.toLowerCase().trim()}`;
 }
+
+// ---------------------------------------------------------------------------
+// Opaque identifier validation (mailbox / message / attachment IDs)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every opaque ID this app generates (see generateMailboxId/generateId in
+ * src/lib/token.ts) is exactly 32 lowercase hex characters (16 random
+ * bytes). Path/header parameters carrying these IDs are untrusted input —
+ * validating the shape here, before any database query, means a malformed
+ * ID gets a fast, consistent 400 instead of silently becoming a DB lookup
+ * that predictably returns nothing (or, worse, being interpolated somewhere
+ * unsafe). This is defense-in-depth on top of parameterized queries, not a
+ * replacement for them — every query in src/db/*.ts already uses .bind().
+ */
+const OPAQUE_ID_PATTERN = /^[0-9a-f]{32}$/;
+
+export function isValidOpaqueId(value: string | undefined | null): value is string {
+  return typeof value === "string" && OPAQUE_ID_PATTERN.test(value);
+}
+
+// ---------------------------------------------------------------------------
+// Pagination validation
+// ---------------------------------------------------------------------------
+
+export interface PaginationValidationResult {
+  valid: boolean;
+  reason?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Strictly validate pagination query parameters. Both must be base-10
+ * integers (not decimals, not NaN, not Infinity, not "1e5"-style exponent
+ * notation) within sane bounds — the endpoint should never be able to force
+ * a huge OFFSET/LIMIT scan just because `Number("1.5")` or `Number("1e10")`
+ * happens to produce a finite value.
+ *
+ * Accepts the raw query-string values (string | undefined) rather than
+ * pre-coerced numbers, since `Number(x)` alone is exactly the too-lenient
+ * pattern being fixed here (it accepts "1.5", turns "" into 0, etc.).
+ */
+export function validatePagination(
+  rawLimit: string | undefined,
+  rawOffset: string | undefined,
+  options: { defaultLimit: number; maxLimit: number }
+): PaginationValidationResult {
+  const limit = rawLimit === undefined ? options.defaultLimit : parseStrictInteger(rawLimit);
+  const offset = rawOffset === undefined ? 0 : parseStrictInteger(rawOffset);
+
+  if (limit === null) {
+    return { valid: false, reason: "limit must be a whole number." };
+  }
+  if (offset === null) {
+    return { valid: false, reason: "offset must be a whole number." };
+  }
+  if (limit < 1) {
+    return { valid: false, reason: "limit must be at least 1." };
+  }
+  if (limit > options.maxLimit) {
+    return { valid: false, reason: `limit must be at most ${options.maxLimit}.` };
+  }
+  if (offset < 0) {
+    return { valid: false, reason: "offset must be zero or greater." };
+  }
+  // A generous but finite ceiling on offset: nothing legitimate ever needs
+  // to page this deep, and without a cap an attacker could force the
+  // database to consider an arbitrarily large OFFSET on every request.
+  const MAX_OFFSET = 1_000_000;
+  if (offset > MAX_OFFSET) {
+    return { valid: false, reason: `offset must be at most ${MAX_OFFSET}.` };
+  }
+
+  return { valid: true, limit, offset };
+}
+
+/**
+ * Parse a string as a strict base-10 integer, rejecting anything
+ * `Number(x)` would too eagerly accept: decimals ("1.5"), "Infinity"/"-Infinity",
+ * exponent notation ("1e5"), leading/trailing whitespace, empty strings, and
+ * non-numeric garbage. Returns null for anything invalid.
+ */
+export function parseStrictInteger(raw: string): number | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  // Only ASCII digits, with an optional leading minus sign. No dots, no
+  // exponents, no whitespace, no unicode digit look-alikes.
+  if (!/^-?\d+$/.test(raw)) return null;
+
+  const value = Number(raw);
+  if (!Number.isInteger(value)) return null;
+  if (!Number.isSafeInteger(value)) return null;
+
+  return value;
+}

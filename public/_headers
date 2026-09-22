@@ -1,0 +1,50 @@
+# Applied by Cloudflare's edge to every static asset response (index.html,
+# app.js, styles.css, favicon.svg, theme-init.js) BEFORE they ever reach the
+# Worker — see https://developers.cloudflare.com/workers/static-assets/headers/
+#
+# This is necessary, not just belt-and-suspenders: Worker code (the
+# `applySecurityHeaders` wrapper in src/index.ts) only runs for requests
+# that reach the Worker's fetch handler. With Workers Static Assets
+# configured (see [assets] in wrangler.toml), a request for a file that
+# exists under public/ is served directly from the edge and NEVER invokes
+# the Worker at all — so without this file, none of the Worker's security
+# headers would apply to the actual HTML/JS/CSS the browser renders.
+#
+# The CSP here is scoped to what this specific frontend actually needs, not
+# a generic template:
+#   - script-src 'self'      — app.js and theme-init.js are same-origin,
+#                               loaded via <script src>; there is no inline
+#                               script anywhere in index.html (the former
+#                               inline theme-flash script was moved to
+#                               theme-init.js specifically so this can be
+#                               'self' with no 'unsafe-inline').
+#   - style-src ... googleapis.com — Google Fonts' stylesheet is the one
+#     external resource this page loads. Self-hosting the font files would
+#     remove even this, but requires bundling the font binaries as static
+#     assets; explicitly scoping to just the required origin (rather than a
+#     blanket allowance) is the documented fallback when self-hosting isn't
+#     done.
+#   - font-src ... gstatic.com — where those Google Fonts' actual font
+#     files are served from.
+#   - img-src 'self'          — the only <img>-like resource is the local
+#     favicon; no remote images are loaded by the page itself (remote
+#     images inside a rendered email are handled entirely inside that
+#     message's own sandboxed iframe, which carries its own separate,
+#     stricter CSP set per-message in public/app.js, not this one).
+#   - frame-src 'self'        — the message viewer's iframe has no `src`,
+#     only `srcdoc`; browsers evaluate frame-src for srcdoc frames against
+#     the parent document's own origin, so this must be 'self' (not 'none')
+#     for that iframe to render at all.
+#   - object-src 'none', base-uri 'self', form-action 'self',
+#     frame-ancestors 'none' — standard hardening with no functional cost:
+#     this page uses no <object>/<embed>, no <base> tag, and its one form
+#     is JS-intercepted (never a real navigation), and must never be framed
+#     by another site (clickjacking).
+
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  X-Frame-Options: DENY
+  Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=()
+  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self'; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'

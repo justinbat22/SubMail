@@ -15,6 +15,7 @@ import {
   listMessagesForMailbox,
 } from "../db/messages.js";
 import { actorKeyFromRequest, checkRateLimit, RATE_LIMITS } from "../lib/rate-limit.js";
+import { isValidOpaqueId, validatePagination } from "../lib/validation.js";
 
 export const messageRoutes = new Hono<{ Bindings: Env }>();
 
@@ -43,14 +44,18 @@ messageRoutes.get("/", requireMailboxAuth, async (c) => {
 
   const mailbox = c.get("mailbox");
 
-  const limitParam = Number(c.req.query("limit") ?? DEFAULT_PAGE_SIZE);
-  const offsetParam = Number(c.req.query("offset") ?? 0);
-  if (!Number.isFinite(limitParam) || !Number.isFinite(offsetParam) || limitParam < 1 || offsetParam < 0) {
-    return apiError("INVALID_REQUEST", "limit and offset must be non-negative numbers.");
+  const pagination = validatePagination(c.req.query("limit"), c.req.query("offset"), {
+    defaultLimit: DEFAULT_PAGE_SIZE,
+    maxLimit: MAX_PAGE_SIZE,
+  });
+  if (!pagination.valid || pagination.limit === undefined || pagination.offset === undefined) {
+    return apiError("INVALID_REQUEST", pagination.reason ?? "Invalid pagination parameters.");
   }
-  const limit = Math.min(limitParam, MAX_PAGE_SIZE);
 
-  const rows = await listMessagesForMailbox(c.env, mailbox.id, { limit, offset: offsetParam });
+  const rows = await listMessagesForMailbox(c.env, mailbox.id, {
+    limit: pagination.limit,
+    offset: pagination.offset,
+  });
   return ok({ messages: rows.map(toSummaryDto) });
 });
 
@@ -58,8 +63,8 @@ messageRoutes.get("/", requireMailboxAuth, async (c) => {
 messageRoutes.get("/:id", requireMailboxAuth, async (c) => {
   const mailbox = c.get("mailbox");
   const messageId = c.req.param("id");
-  if (!messageId) {
-    return apiError("INVALID_REQUEST", "Message id is required.");
+  if (!isValidOpaqueId(messageId)) {
+    return apiError("MESSAGE_NOT_FOUND", "Message not found.");
   }
 
   const message = await getMessageForMailbox(c.env, mailbox.id, messageId);
@@ -90,8 +95,8 @@ messageRoutes.get("/:id", requireMailboxAuth, async (c) => {
 messageRoutes.delete("/:id", requireMailboxAuth, async (c) => {
   const mailbox = c.get("mailbox");
   const messageId = c.req.param("id");
-  if (!messageId) {
-    return apiError("INVALID_REQUEST", "Message id is required.");
+  if (!isValidOpaqueId(messageId)) {
+    return apiError("MESSAGE_NOT_FOUND", "Message not found.");
   }
 
   const deleted = await deleteMessageCascade(c.env, mailbox.id, messageId);

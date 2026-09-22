@@ -9,19 +9,11 @@
 
 <!--
   Applied before first paint to avoid a flash of the wrong theme (spec §45).
-  Reads the persisted preference and sets data-theme on <html>; CSS below
-  reacts to both this attribute and prefers-color-scheme for "system" mode.
+  Externalized to its own file (rather than inline) so the page's CSP can
+  use a plain `script-src 'self'` with no 'unsafe-inline' — see public/_headers
+  and theme-init.js for the details.
 -->
-<script>
-(function () {
-  try {
-    var stored = localStorage.getItem("tempmail:theme");
-    if (stored === "light" || stored === "dark") {
-      document.documentElement.setAttribute("data-theme", stored);
-    }
-  } catch (e) { /* localStorage unavailable (private mode, etc.) — fall back to system */ }
-})();
-</script>
+<script src="/theme-init.js"></script>
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
