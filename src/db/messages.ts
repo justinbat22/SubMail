@@ -1,5 +1,6 @@
 import type { AttachmentRow, Env, MessageRow } from "../types/index.js";
 import { generateId } from "../lib/token.js";
+import { deleteStoredObjects } from "../lib/b2.js";
 
 export class MailboxFullError extends Error {
   constructor(mailboxId: string) {
@@ -235,7 +236,11 @@ export async function getMessageByMailboxAndMessageId(
   return row ?? null;
 }
 
-/** Build a random, non-guessable R2 object key. Never derived from the filename or address. */
+/** Build a random, non-guessable object-storage (B2) key. Never derived from the filename or address.
+ *
+ * The name is historical (R2 era) but the shape is unchanged: an opaque,
+ * randomly generated key usable with any object store.
+ */
 export function buildAttachmentR2Key(mailboxId: string, messageId: string): string {
   return `attachments/${mailboxId}/${messageId}/${generateId()}`;
 }
@@ -304,7 +309,7 @@ export async function getAttachmentForMailbox(
   return row ?? null;
 }
 
-/** Delete a single message, its attachment rows (cascade), and their R2 objects. */
+/** Delete a single message, its attachment rows (cascade), and their stored B2 objects. */
 export async function deleteMessageCascade(env: Env, mailboxId: string, messageId: string): Promise<boolean> {
   const attachments = await env.DB.prepare(
     `SELECT a.r2_key AS r2_key
@@ -317,7 +322,7 @@ export async function deleteMessageCascade(env: Env, mailboxId: string, messageI
 
   const keys = (attachments.results ?? []).map((r) => r.r2_key);
   if (keys.length > 0) {
-    await env.ATTACHMENTS.delete(keys);
+    await deleteStoredObjects(env, keys);
   }
 
   const result = await env.DB.prepare(`DELETE FROM messages WHERE id = ? AND mailbox_id = ?`)

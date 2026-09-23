@@ -45,7 +45,7 @@ async function createTestMailbox(localPart: string) {
 }
 
 describe("Transient vs permanent failure semantics in the email() entrypoint", () => {
-  it("propagates (throws) when an R2 upload fails, so Cloudflare's retry can recover it", async () => {
+  it("propagates (throws) when a B2 upload fails, so Cloudflare's retry can recover it", async () => {
     const mailbox = await createTestMailbox("transient-r2-test");
 
     const boundary = "----=_Boundary";
@@ -68,13 +68,14 @@ describe("Transient vs permanent failure semantics in the email() entrypoint", (
       ``,
     ].join("\r\n");
 
-    // Simulate an R2 outage: same env, but ATTACHMENTS.put always fails.
+    // Simulate a storage outage: same env, but the attachment storage put
+    // always fails (the b2.ts test seam's ATTACHMENTS binding).
     const brokenEnv: Env = {
       ...env,
       ATTACHMENTS: {
         ...env.ATTACHMENTS,
         put: async () => {
-          throw new Error("Simulated R2 outage");
+          throw new Error("Simulated storage outage");
         },
       } as unknown as Env["ATTACHMENTS"],
     };
@@ -85,7 +86,7 @@ describe("Transient vs permanent failure semantics in the email() entrypoint", (
     await expect(worker.email!(message, brokenEnv, ctx)).rejects.toThrow();
     await waitOnExecutionContext(ctx);
 
-    // No message row should exist — R2 failed before any D1 write was attempted.
+    // No message row should exist — storage failed before any D1 write was attempted.
     const count = await env.DB.prepare("SELECT COUNT(*) AS count FROM messages WHERE mailbox_id = ?")
       .bind(mailbox.id)
       .first<{ count: number }>();

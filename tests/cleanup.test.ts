@@ -42,7 +42,7 @@ describe("runExpiredMailboxCleanup", () => {
     expect(activeRow).not.toBeNull();
   });
 
-  it("cascades deletion to messages, attachment metadata, and R2 objects", async () => {
+  it("cascades deletion to messages, attachment metadata, and stored B2 objects (via the local R2 test binding)", async () => {
     const mailbox = await createMailboxWithExpiry("with-mail", Date.now() - 1000);
     const message = await createMessage(env, {
       mailboxId: mailbox.id,
@@ -58,7 +58,7 @@ describe("runExpiredMailboxCleanup", () => {
     });
 
     const r2Key = buildAttachmentR2Key(mailbox.id, message.id);
-    await env.ATTACHMENTS.put(r2Key, new TextEncoder().encode("file contents"));
+    await env.ATTACHMENTS!.put(r2Key, new TextEncoder().encode("file contents"));
     await createAttachment(env, {
       messageId: message.id,
       filename: "file.txt",
@@ -73,7 +73,7 @@ describe("runExpiredMailboxCleanup", () => {
     const attachmentRow = await env.DB.prepare("SELECT 1 FROM attachments WHERE message_id = ?")
       .bind(message.id)
       .first();
-    const r2Object = await env.ATTACHMENTS.get(r2Key);
+    const r2Object = await env.ATTACHMENTS!.get(r2Key);
 
     expect(messageRow).toBeNull();
     expect(attachmentRow).toBeNull();

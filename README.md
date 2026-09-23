@@ -1,10 +1,11 @@
 # TempMail
 
-A temporary, disposable email service built entirely on Cloudflare: **Workers**,
-**D1**, **R2**, **Email Routing**, and **Cron Triggers**. No account, no
-password, no external APIs — mailboxes generate a human-looking address
-locally, receive real email through Cloudflare's own mail infrastructure, and
-delete themselves automatically after a configurable TTL.
+A temporary, disposable email service built on Cloudflare **Workers**, **D1**,
+**Email Routing**, and **Cron Triggers**, with attachments stored in
+**Backblaze B2** (S3-Compatible API). No account, no password, no external
+APIs — mailboxes generate a human-looking address locally, receive real email
+through Cloudflare's own mail infrastructure, and delete themselves
+automatically after a configurable TTL.
 
 ```
 emiliano.zieme.1439@example.com
@@ -54,8 +55,8 @@ no VM, no container, and no external name-generation or mailbox API.
 - **Custom addresses** with live availability checking.
 - **Real email receiving** via Cloudflare Email Routing — plain text, HTML,
   multipart, and attachments, parsed with `postal-mime`.
-- **Attachments** stored in R2 under unpredictable keys, never served
-  publicly — only through an authenticated Worker endpoint.
+- **Attachments** stored in Backblaze B2 under unpredictable keys, never
+  served publicly — only through an authenticated Worker endpoint.
 - **Security-first HTML rendering**: incoming HTML email is rendered in a
   fully sandboxed `<iframe sandbox="">` with its own strict CSP. No
   `allow-scripts`, no `allow-same-origin`. Remote images are blocked by
@@ -66,7 +67,7 @@ no VM, no container, and no external name-generation or mailbox API.
   hash, and never derived from or interchangeable with the email address.
 - **Automatic + immediate cleanup**: an hourly Cron Trigger sweeps expired
   mailboxes in bounded batches; deleting a mailbox (or a single message) is
-  instant and cascades through D1 and R2.
+  instant and cascades through D1 and B2.
 - **No countdown timer.** The 48-hour TTL is enforced server-side and is
   never surfaced as a ticking clock in the UI.
 - Dark / light / system theme, mobile-first responsive layout, keyboard and
@@ -82,13 +83,13 @@ flowchart TB
         MailDomain["example.com"]
         Worker["Cloudflare Worker\n(Hono app + email handler)"]
         D1[("D1 - mailboxes, messages,\nattachment metadata, rate limits")]
-        R2[("R2 - attachment contents")]
+        B2[("Backblaze B2 -\nattachment contents")]
         Cron["Cron Trigger (hourly)"]
 
         AppDomain -->|"static assets + /api/*"| Worker
         MailDomain -->|"Email Routing catch-all"| Worker
         Worker --> D1
-        Worker --> R2
+        Worker -->|"S3-Compatible API\n(SigV4 signed)"| B2
         Cron --> Worker
     end
 
@@ -96,9 +97,11 @@ flowchart TB
     Sender["External email sender"] --> MailDomain
 ```
 
-One Worker, two triggers into it (HTTP requests and incoming email), two
-storage bindings (D1 for structured data, R2 for attachment bytes), and one
-Cron Trigger for cleanup. Static frontend files (`public/`) are served by
+One Worker, two triggers into it (HTTP requests and incoming email), one
+storage binding (D1 for structured data and rate limits), one external
+object store (Backblaze B2, via its S3-Compatible API over SigV4-signed
+requests, for attachment bytes), and one Cron Trigger for cleanup. Static
+frontend files (`public/`) are served by
 Cloudflare's Workers Static Assets directly from the edge; anything under
 `/api/*` reaches the Worker's `fetch` handler.
 
@@ -106,6 +109,8 @@ Cloudflare's Workers Static Assets directly from the edge; anything under
 
 - A Cloudflare account with a domain you control (for Email Routing) — or
   just Workers access for local development/testing without real mail.
+- A [Backblaze B2](https://www.backblaze.com/) account with a private bucket
+  and a dedicated application key (see setup step 3).
 - [Node.js](https://nodejs.org/) 18+
 - [Wrangler](https://developers.cloudflare.com/workers/wrangler/) (installed
   as a dev dependency; invoked via `npx wrangler`)
@@ -175,14 +180,34 @@ the trigger that enforces `MAX_MESSAGES_PER_MAILBOX` atomically at the
 database level — see [Operational notes](#operational-notes) for what that
 means if you ever change that limit.
 
-### 3. Create the R2 bucket
+### 3. Set up Backblaze B2
 
-```bash
-npx wrangler r2 bucket create tempmail-attachments
-```
+Attachment storage lives in Backblaze B2 via its S3-Compatible API
+([docs](https://www.backblaze.com/docs/cloud-storage-s3-compatible-api)):
 
-The binding in `wrangler.toml` (`ATTACHMENTS`) already points at this bucket
-name — no ID to copy for R2.
+1. In the Backblaze console, create a **private** bucket (e.g.
+   `tempmail-attachments`). Note the bucket's **Endpoint**, which contains
+   the region (e.g. `s3.us-east-005.backblazeb2.com` → region
+   `us-east-005`).
+2. Under **Application Keys**, add a new application key **restricted to
+   that bucket** with the capabilities `readFiles`, `writeFiles`, and
+   `deleteFiles` (`writeFiles` + `deleteFiles` are both needed for the
+   batch Delete Objects call). Note the **keyID** and the **key** — the key
+   is shown only once.
+3. Set the credentials as Worker secrets (never in `wrangler.toml`):
+
+   ```bash
+   npx wrangler secret put B2_KEY_ID           # the app key's keyID
+   npx wrangler secret put B2_APPLICATION_KEY  # the app key itself
+   ```
+
+   `B2_REGION` and `B2_BUCKET` are non-secret and live in the `[vars]`
+   block of `wrangler.toml`.
+
+Important: the **master account key does not work** with the S3-Compatible
+API — only application keys created as above do. The bucket must stay
+private; attachments are only ever served through the Worker's authenticated
+`/api/attachments/:id` endpoint.
 
 ### 4. Configure Email Routing
 
@@ -232,9 +257,11 @@ destination.
 ## Environment variables
 
 All configuration lives in `wrangler.toml`'s `[vars]` block (or per-environment
-`[env.<name>.vars]`). None of these are secrets — no API keys or credentials
-are configured this way; D1/R2 access is via bindings, and there is nothing
-else to authenticate to.
+`[env.<name>.vars]`). D1 access is via a binding, so it needs no
+credentials. Backblaze B2 access is credential-based: `B2_KEY_ID` and
+`B2_APPLICATION_KEY` are **secrets** set via `wrangler secret put` (see
+setup step 3) and must never be committed; `B2_REGION` and `B2_BUCKET` are
+non-secret and live in `[vars]`.
 
 | Variable                      | Purpose                                             | Default    |
 | ------------------------------ | ---------------------------------------------------- | ---------- |
@@ -246,6 +273,10 @@ else to authenticate to.
 | `MAX_ATTACHMENTS_PER_MESSAGE`  | Attachments kept per message; extras are dropped     | `10`       |
 | `MAX_MESSAGES_PER_MAILBOX`     | Mailbox capacity; further mail is bounced (SMTP reject) | `200`   |
 | `CLEANUP_BATCH_SIZE`           | Mailboxes processed per Cron invocation              | `50`       |
+| `B2_REGION`                    | B2 S3 endpoint region (from the bucket's Endpoint)   | `us-east-005` |
+| `B2_BUCKET`                    | Private B2 bucket holding attachment contents        | `tempmail-attachments` |
+| `B2_KEY_ID`                    | B2 application key ID (**secret** — `wrangler secret put`) | — |
+| `B2_APPLICATION_KEY`           | B2 application key (**secret** — `wrangler secret put`) | — |
 
 For local development against `localhost`, the defaults work as-is — mail
 delivery obviously requires a real domain with Email Routing configured, but
@@ -255,7 +286,7 @@ the mailbox/API/frontend flow works fully without it.
 
 ```bash
 npm install
-npm run dev          # wrangler dev - local Worker + simulated D1/R2
+npm run dev          # wrangler dev - local Worker + simulated D1 (B2 needs credentials only for real attachment uploads)
 npm run typecheck    # tsc --noEmit
 npm run lint         # eslint
 npm test             # vitest, via @cloudflare/vitest-pool-workers
@@ -272,7 +303,11 @@ handler tests are for (see below).
 
 The test suite runs against the **actual Workers runtime** (`workerd`) via
 `@cloudflare/vitest-pool-workers` — not a Node.js approximation — with real
-D1 and R2 bindings simulated locally. 200 tests across 14 files:
+D1 simulated locally. Attachment storage goes through the seam in
+`src/lib/b2.ts`: when an R2-compatible `ATTACHMENTS` binding exists (as the
+local test config provides), it is used; in production the binding is absent
+and B2's S3-Compatible API is used — same code paths, no network or
+credentials needed for tests. 200 tests across 14 files:
 
 - **`username-generator.test.ts`** — thousands of generated usernames checked
   for valid syntax, dataset membership, length bounds, reserved-name
@@ -296,9 +331,9 @@ D1 and R2 bindings simulated locally. 200 tests across 14 files:
   and delivery idempotency exist for, proven under real concurrent load: a
   mailbox's message count never exceeds its configured limit even under 25
   simultaneous deliveries, and 6 concurrent retries of the identical message
-  collapse to exactly one stored copy with no orphaned R2 objects.
+  collapse to exactly one stored copy with no orphaned storage objects.
 - **`transient-failures.test.ts`** — proves the permanent-vs-transient email
-  failure split actually works, via real fault injection (a broken R2/D1
+  failure split actually works, via real fault injection (a broken storage/D1
   binding): transient failures propagate out of `email()` so Cloudflare can
   retry them, while permanent conditions (malformed MIME, unknown recipient,
   duplicate delivery) still resolve normally, never throwing.
@@ -308,7 +343,7 @@ D1 and R2 bindings simulated locally. 200 tests across 14 files:
   "wrong token"), a full cross-mailbox authorization matrix, and end-to-end
   XSS/path-traversal payloads run through the real pipeline.
 - **`cleanup.test.ts`** — the Cron job's expired-vs-active mailbox handling,
-  D1+R2 cascade deletion, bounded batching across multiple runs, and
+  D1+storage cascade deletion, bounded batching across multiple runs, and
   idempotency.
 
 ```bash
@@ -332,7 +367,7 @@ at creation time.
 | GET    | `/api/mailbox/messages`       | ✓    | List messages, newest first. `?limit=&offset=`. |
 | GET    | `/api/mailbox/messages/:id`   | ✓    | Full message detail, including attachment metadata. |
 | DELETE | `/api/mailbox/messages/:id`   | ✓    | Delete a single message and its attachments. |
-| GET    | `/api/attachments/:id`        | ✓    | Download an attachment (streamed from R2). |
+| GET    | `/api/attachments/:id`        | ✓    | Download an attachment (streamed from B2). |
 | GET    | `/api/health`                 | —    | `{ "status": "ok" }` — no infrastructure details exposed. |
 
 ## Security
@@ -351,15 +386,15 @@ specifics.
   concurrent load in `tests/concurrency.test.ts`. See
   [Operational notes](#operational-notes).
 - **Email delivery is idempotent and internally atomic**: incoming mail is
-  uploaded to R2 first, then written to D1 as a single atomic batch (message
+  uploaded to B2 first, then written to D1 as a single atomic batch (message
   + all attachment rows together — proven empirically to be all-or-nothing).
   A `UNIQUE(mailbox_id, message_id)` index makes a retried delivery (e.g.
   after a transient failure) a safe no-op instead of a duplicate, with any
-  now-redundant R2 uploads cleaned up.
+  now-redundant uploads cleaned up.
 - **Transient vs. permanent email failures are handled differently on
   purpose**: permanent conditions (malformed MIME, unknown recipient,
   mailbox full, already-processed duplicate) are handled inline and never
-  retried; genuinely unexpected failures (an R2 or D1 outage) propagate out
+  retried; genuinely unexpected failures (a B2 or D1 outage) propagate out
   of the Worker's `email()` entrypoint so Cloudflare's own retry mechanism
   can recover the message, rather than being silently swallowed and lost.
 - **MIME parsing is guarded against pathological input** `postal-mime`
@@ -372,8 +407,8 @@ specifics.
   with its own strict CSP, plus a defense-in-depth textual sanitizer applied
   before storage. The sandbox — not the sanitizer — is the actual security
   boundary.
-- **Attachments**: random R2 keys (`attachments/{mailboxId}/{messageId}/{randomId}`,
-  never the original filename), filenames sanitized against path traversal
+- **Attachments**: random object keys (`attachments/{mailboxId}/{messageId}/{randomId}`)
+  in a **private** B2 bucket, never the original filename, filenames sanitized against path traversal
   and null bytes, served only through an authenticated endpoint that forces
   `Content-Disposition: attachment` for anything with an HTML/SVG/XML/JS
   extension **or** declared content-type (checked independently, since a
@@ -411,9 +446,11 @@ specifics.
 
 ## Dependency choices
 
-Runtime dependencies (`hono`, `postal-mime`) are kept at their latest stable
-releases — these are what actually ship in the deployed Worker bundle and
-process untrusted internet email, so they get the most scrutiny.
+Runtime dependencies (`hono`, `postal-mime`, `aws4fetch`) are kept at their
+latest stable releases — these are what actually ship in the deployed Worker
+bundle and process untrusted internet email, so they get the most scrutiny.
+`aws4fetch` is a ~2.5 kB gzipped AWS SigV4 request signer built for Workers'
+`fetch` + SubtleCrypto, used to sign requests to B2's S3-Compatible API.
 
 Dev-only tooling (`wrangler`, `@cloudflare/vitest-pool-workers`, `vitest`)
 involved a real trade-off, documented here rather than glossed over:
@@ -448,7 +485,7 @@ involved a real trade-off, documented here rather than glossed over:
 ## Operational notes
 
 **Changing `MAX_MESSAGES_PER_MAILBOX`.** The env var in `wrangler.toml`
-drives an early rejection (avoiding wasted MIME-parsing/R2-upload work for
+drives an early rejection (avoiding wasted MIME-parsing/storage-upload work for
 an obviously-full mailbox), but the *authoritative*, race-safe enforcement
 is a database trigger (`migrations/0003_mailbox_message_limit.sql`) reading
 from a `mailbox_limits` config table — SQLite triggers can't read a Worker's
@@ -471,8 +508,11 @@ suite on every push and pull request. A second job deploys to Cloudflare via
 `wrangler deploy` — but only after the test job succeeds, and only on pushes
 to `main`. It needs two GitHub Actions secrets:
 
-- `CLOUDFLARE_API_TOKEN` — a scoped token with Workers Scripts, D1, and R2
-  edit permissions for your account.
+- `CLOUDFLARE_API_TOKEN` — a scoped token with Workers Scripts and D1 edit
+  permissions for your account.
+- B2 credentials as repository secrets for whatever mechanism injects
+  `B2_KEY_ID` / `B2_APPLICATION_KEY` (e.g. `wrangler secret put` in CI),
+  since B2 is credential-based rather than binding-based.
 - `CLOUDFLARE_ACCOUNT_ID`
 
 Neither is ever printed to logs; GitHub Actions also automatically redacts
@@ -500,15 +540,15 @@ npx wrangler deploy
 - The bundled name dataset (~490 first names, ~540 surnames) is
   intentionally curated rather than exhaustive; extend `data/first-names.ts`
   / `data/surnames.ts` if you want more variety at scale.
-- **R2/D1 compensation is best-effort, not exactly-once.** Email storage
-  uploads to R2 before writing to D1 specifically to avoid the more common
-  partial-state failures, and cleans up orphaned R2 objects if the D1 write
+- **B2/D1 compensation is best-effort, not exactly-once.** Email storage
+  uploads to B2 before writing to D1 specifically to avoid the more common
+  partial-state failures, and cleans up orphaned B2 objects if the D1 write
   then fails — but if that *cleanup* delete itself fails (a second,
-  independent R2 outage on top of the first failure), the orphaned object
-  is logged clearly (`event: "r2-compensation-failed"`) but not automatically
+  independent outage on top of the first failure), the orphaned object
+  is logged clearly (`event: "b2-compensation-failed"`) but not automatically
   retried. True exactly-once cleanup across two independent storage systems
   needs a durable outbox log, which this project deliberately doesn't add —
-  the documented, logged residual risk of a rare orphaned R2 object was
+  the documented, logged residual risk of a rare orphaned B2 object was
   judged preferable to that added complexity. An orphan-sweeping Cron job
   would be a reasonable future addition if this matters for a given
   deployment's storage costs.

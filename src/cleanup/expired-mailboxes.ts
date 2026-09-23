@@ -11,8 +11,8 @@ export interface CleanupResult {
 /**
  * Runs one bounded batch of expired-mailbox cleanup. Safe to invoke
  * repeatedly (idempotent): a mailbox that was already deleted simply won't
- * appear in the next `findExpiredMailboxes` batch, and deleting an R2 key
- * that no longer exists is a no-op rather than an error.
+ * appear in the next `findExpiredMailboxes` batch, and deleting a storage
+ * object key that no longer exists is a no-op rather than an error.
  *
  * Cloudflare Cron Triggers invoke this hourly (see wrangler.toml); a single
  * invocation only processes `CLEANUP_BATCH_SIZE` mailboxes so an unusually

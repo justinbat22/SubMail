@@ -71,7 +71,8 @@ function bytesToHex(bytes: Uint8Array): string {
 
 /**
  * Generate a random opaque mailbox ID (not the email address itself, and not
- * derived from it). Used as the D1 primary key and in R2 object key prefixes.
+ * derived from it). Used as the D1 primary key and in object-storage (B2)
+ * key prefixes.
  */
 export function generateMailboxId(): string {
   const bytes = new Uint8Array(16);
@@ -79,7 +80,7 @@ export function generateMailboxId(): string {
   return bytesToHex(bytes);
 }
 
-/** Generate a random opaque ID for messages, attachments, and R2 key segments. */
+/** Generate a random opaque ID for messages, attachments, and storage key segments. */
 export function generateId(): string {
   return generateMailboxId();
 }

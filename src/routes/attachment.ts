@@ -7,11 +7,13 @@ import { actorKeyFromRequest, checkRateLimit, RATE_LIMITS } from "../lib/rate-li
 import { isRiskyForInlineRendering } from "../lib/attachment-validation.js";
 import { securityHeaders } from "../lib/security.js";
 import { isValidOpaqueId } from "../lib/validation.js";
+import { getStoredObject } from "../lib/b2.js";
 
 export const attachmentRoutes = new Hono<{ Bindings: Env }>();
 
 /**
- * GET /api/attachments/:id — streams the attachment from R2.
+ * GET /api/attachments/:id — streams the attachment from B2 (Backblaze
+ * object storage).
  *
  * Requires the same mailbox auth as every other mailbox-scoped endpoint
  * (the attachment ID alone is not a capability token — see
@@ -43,9 +45,9 @@ attachmentRoutes.get("/:id", requireMailboxAuth, async (c) => {
     return apiError("ATTACHMENT_NOT_FOUND", "Attachment not found.");
   }
 
-  const object = await c.env.ATTACHMENTS.get(attachment.r2_key);
+  const object = await getStoredObject(c.env, attachment.r2_key);
   if (!object) {
-    // Metadata exists but the R2 object is missing (shouldn't normally
+    // Metadata exists but the storage object is missing (shouldn't normally
     // happen outside a partial-failure edge case). Treat as not-found
     // rather than a 500, since from the client's perspective it isn't
     // downloadable either way.

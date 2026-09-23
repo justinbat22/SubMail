@@ -60,7 +60,7 @@ export default {
       }));
       // Rethrow rather than swallow. handleIncomingEmail only ever lets an
       // exception reach here for GENUINELY UNEXPECTED/TRANSIENT failures
-      // (an R2 upload error, an unexpected D1 error) — every PERMANENT,
+      // (a B2 upload error, an unexpected D1 error) — every PERMANENT,
       // never-worth-retrying condition (unknown recipient, expired mailbox,
       // oversized message, mailbox full, malformed MIME, already-processed
       // duplicate) is handled inside handleIncomingEmail itself, which
@@ -69,7 +69,7 @@ export default {
       // An earlier version of this handler swallowed every exception here
       // "to avoid a retry storm" — but that silently and permanently
       // dropped mail whenever a purely transient infrastructure hiccup hit
-      // R2 or D1, with no way to ever recover it. Letting the exception
+      // B2 or D1, with no way to ever recover it. Letting the exception
       // propagate causes Cloudflare to treat the delivery as failed, which
       // is what lets the sending MTA's normal (rate-limited, bounded) retry
       // behavior actually recover the message — the retry storm concern is

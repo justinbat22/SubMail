@@ -1,11 +1,24 @@
 /**
  * Cloudflare Worker environment bindings and configuration.
- * Mirrors the [vars], [[d1_databases]], and [[r2_buckets]] entries in wrangler.toml.
+ * Mirrors the [vars] and [[d1_databases]] entries in wrangler.toml.
+ *
+ * Attachment object storage is Backblaze B2 (S3-Compatible API) rather than
+ * the previous native R2 binding — B2 credentials/endpoint are provided as
+ * environment variables (the secrets via [secrets]/`wrangler secret put`,
+ * see src/lib/b2.ts).
  */
 export interface Env {
   // Bindings
   DB: D1Database;
-  ATTACHMENTS: R2Bucket;
+  /**
+   * OPTIONAL R2-compatible binding used only as a local/test seam by
+   * src/lib/b2.ts: when present (e.g. the vitest-pool-workers suite's
+   * Miniflare R2 bucket), attachment storage goes through it so tests stay
+   * offline and deterministic. In production this binding is absent and
+   * attachments are stored in Backblaze B2 via the S3-Compatible API (see
+   * B2_* configuration below).
+   */
+  ATTACHMENTS?: R2Bucket;
 
   // Configuration (all strings — Workers env vars are always strings)
   EMAIL_DOMAIN: string;
@@ -16,6 +29,12 @@ export interface Env {
   MAX_ATTACHMENTS_PER_MESSAGE: string;
   MAX_MESSAGES_PER_MAILBOX: string;
   CLEANUP_BATCH_SIZE: string;
+
+  // Backblaze B2 attachment storage (see src/lib/b2.ts)
+  B2_KEY_ID: string;
+  B2_APPLICATION_KEY: string;
+  B2_REGION: string;
+  B2_BUCKET: string;
 }
 
 /** Strongly-typed, parsed view of Env's numeric configuration. */
@@ -79,6 +98,8 @@ export interface AttachmentRow {
   filename: string;
   content_type: string | null;
   size_bytes: number;
+  // Historical column name — holds the opaque B2 object key (previously an
+  // R2 key; the schema is unchanged, and keys are random in either case).
   r2_key: string;
   created_at: number;
 }
