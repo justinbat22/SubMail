@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
-import { env } from "cloudflare:test";
+import { env, SELF, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
+import worker from "../src/index.js";
 import { createMailbox } from "../src/db/mailboxes.js";
 import { createMessage, createAttachment, buildAttachmentR2Key } from "../src/db/messages.js";
 import { hashToken, generateMailboxToken } from "../src/lib/token.js";
@@ -119,6 +120,122 @@ describe("runExpiredMailboxCleanup", () => {
   it("handles an empty mailboxes table without error", async () => {
     const result = await runExpiredMailboxCleanup(env);
     expect(result.mailboxesDeleted).toBe(0);
+  });
+
+  it("makes an expired mailbox's attachment permanently unreachable end-to-end (real scheduled() cron, real HTTP download)", async () => {
+    // This exercises the FULL production path rather than the internal
+    // helper: a mailbox is created over the real API, an attachment is
+    // uploaded and downloaded over the real endpoint, the mailbox is aged
+    // past its TTL, and the actual `scheduled()` cron handler is invoked.
+    // It then proves the attachment is not merely unlisted but truly gone:
+    // the storage object is deleted, the D1 rows are cascaded away, and the
+    // download endpoint stops serving the bytes even for a caller who still
+    // holds a valid (pre-expiry) token — which is the property that matters
+    // for a service whose entire promise is that mail deletes itself.
+    const created = await SELF.fetch("https://app.example.com/api/mailbox", { method: "POST" });
+    const { data: mailbox } = (await created.json()) as { data: { id: string; token: string; address: string } };
+
+    const message = await createMessage(env, {
+      mailboxId: mailbox.id,
+      messageId: null,
+      senderName: "Sender",
+      senderAddress: "sender@outside.example",
+      recipientAddress: mailbox.address,
+      subject: "With attachment",
+      textBody: "see attached",
+      htmlBody: null,
+      sizeBytes: 120,
+      hasAttachments: true,
+    });
+
+    const r2Key = buildAttachmentR2Key(mailbox.id, message.id);
+    const fileBytes = new TextEncoder().encode("attachment-bytes-to-be-deleted");
+    await env.ATTACHMENTS!.put(r2Key, fileBytes, { httpMetadata: { contentType: "text/plain" } });
+    const attachment = await createAttachment(env, {
+      messageId: message.id,
+      filename: "secret.txt",
+      contentType: "text/plain",
+      sizeBytes: fileBytes.byteLength,
+      r2Key,
+    });
+
+    const authHeaders = { Authorization: `Bearer ${mailbox.token}`, "X-Mailbox-Id": mailbox.id };
+
+    // Before expiry: the attachment downloads successfully.
+    const beforeRes = await SELF.fetch(`https://app.example.com/api/attachments/${attachment.id}`, {
+      headers: authHeaders,
+    });
+    expect(beforeRes.status).toBe(200);
+    expect(await beforeRes.text()).toBe("attachment-bytes-to-be-deleted");
+
+    // Age the mailbox past its TTL and run the real Cron entry point.
+    await env.DB.prepare("UPDATE mailboxes SET expires_at = ? WHERE id = ?")
+      .bind(Date.now() - 1000, mailbox.id)
+      .run();
+
+    const ctx = createExecutionContext();
+    await worker.scheduled!({} as ScheduledEvent, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    // The stored object itself is gone from object storage.
+    expect(await env.ATTACHMENTS!.get(r2Key)).toBeNull();
+
+    // All D1 rows are cascaded away.
+    expect(await env.DB.prepare("SELECT 1 FROM mailboxes WHERE id = ?").bind(mailbox.id).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT 1 FROM messages WHERE id = ?").bind(message.id).first()).toBeNull();
+    expect(
+      await env.DB.prepare("SELECT 1 FROM attachments WHERE id = ?").bind(attachment.id).first()
+    ).toBeNull();
+
+    // And the bytes are no longer retrievable over HTTP with the old token.
+    const afterRes = await SELF.fetch(`https://app.example.com/api/attachments/${attachment.id}`, {
+      headers: authHeaders,
+    });
+    expect(afterRes.status).not.toBe(200);
+    expect(await afterRes.text()).not.toContain("attachment-bytes-to-be-deleted");
+  });
+
+  it("does not delete attachments belonging to a mailbox that is still active", async () => {
+    // The complement of the test above: the cascade must be scoped to the
+    // expired mailbox only, so one mailbox reaching its TTL can never take
+    // another mailbox's attachments down with it.
+    const expired = await createMailboxWithExpiry("gone-soon", Date.now() - 1000);
+    const active = await createMailboxWithExpiry("still-here", Date.now() + 60 * 60 * 1000);
+
+    async function attach(mailboxId: string, address: string, key: string) {
+      const message = await createMessage(env, {
+        mailboxId,
+        messageId: null,
+        senderName: "Sender",
+        senderAddress: "sender@outside.example",
+        recipientAddress: address,
+        subject: "Has attachment",
+        textBody: "body",
+        htmlBody: null,
+        sizeBytes: 50,
+        hasAttachments: true,
+      });
+      const r2Key = buildAttachmentR2Key(mailboxId, message.id);
+      await env.ATTACHMENTS!.put(r2Key, new TextEncoder().encode(key));
+      return createAttachment(env, {
+        messageId: message.id,
+        filename: `${key}.txt`,
+        contentType: "text/plain",
+        sizeBytes: key.length,
+        r2Key,
+      });
+    }
+
+    const expiredAttachment = await attach(expired.id, expired.address, "expired-file");
+    const activeAttachment = await attach(active.id, active.address, "active-file");
+
+    await runExpiredMailboxCleanup(env);
+
+    expect(await env.ATTACHMENTS!.get(expiredAttachment.r2_key)).toBeNull();
+    expect(await env.ATTACHMENTS!.get(activeAttachment.r2_key)).not.toBeNull();
+    expect(
+      await env.DB.prepare("SELECT 1 FROM attachments WHERE id = ?").bind(activeAttachment.id).first()
+    ).not.toBeNull();
   });
 
   it("also sweeps stale rate-limit windows older than 24 hours", async () => {

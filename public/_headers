@@ -26,11 +26,21 @@
 #     done.
 #   - font-src ... gstatic.com — where those Google Fonts' actual font
 #     files are served from.
-#   - img-src 'self'          — the only <img>-like resource is the local
-#     favicon; no remote images are loaded by the page itself (remote
-#     images inside a rendered email are handled entirely inside that
-#     message's own sandboxed iframe, which carries its own separate,
-#     stricter CSP set per-message in public/app.js, not this one).
+#   - img-src 'self' data: https: — the page's OWN markup only ever loads
+#     the local favicon/logo (self), but `data:` and `https:` are required
+#     here for a non-obvious reason: a `<iframe srcdoc>` document INHERITS
+#     its parent's CSP, and the two policies are INTERSECTED, not
+#     overridden. The message viewer's per-message iframe (public/app.js)
+#     sets its own stricter `img-src data:` by default and widens it to
+#     `img-src data: https:` only after the user clicks "Load images" — but
+#     if this top-level policy said `img-src 'self'`, the intersection
+#     would clamp it back to 'self' and the "Load images" button would
+#     silently do nothing. Allowing https: at the parent level is safe
+#     because the page never inserts remote images into its own document
+#     (all untrusted email HTML is textContent/srcdoc-only and confined to
+#     a `sandbox=""` frame); the tracking-pixel protection is still
+#     enforced by the child frame's own policy, which still blocks remote
+#     images until the user opts in.
 #   - frame-src 'self'        — the message viewer's iframe has no `src`,
 #     only `srcdoc`; browsers evaluate frame-src for srcdoc frames against
 #     the parent document's own origin, so this must be 'self' (not 'none')
@@ -47,4 +57,4 @@
   X-Frame-Options: DENY
   Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=()
   Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self'; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'

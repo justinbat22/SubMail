@@ -632,9 +632,21 @@ a { color: var(--blue); }
 .message-view__fields dt { color: var(--muted); min-width: 66px; flex-shrink: 0; }
 .message-view__fields dd { margin: 0; word-break: break-word; }
 
-.message-view__body { padding: 16px; flex: 1; }
+/* The body takes every pixel the header/meta/attachments don't, and the
+   frame inside it grows to match — otherwise the panel (which is
+   `inset: 0`, i.e. full-screen on mobile) leaves a large empty gap under a
+   short email. `min-height: 0` is what actually lets a flex child shrink
+   and scroll instead of overflowing its parent. */
+.message-view__body {
+  padding: 16px;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
 .message-view__body iframe {
   width: 100%;
+  flex: 1 1 auto;
   min-height: 260px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -645,12 +657,18 @@ a { color: var(--blue); }
   word-break: break-word;
   font-family: var(--font-body);
   margin: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 .message-view__load-images {
   margin-bottom: 10px;
 }
 
-.message-view__attachments { padding: 0 16px 20px; }
+.message-view__attachments {
+  padding: 0 16px 20px;
+  flex-shrink: 0;
+}
 .message-view__attachments h3 { font-size: 0.95rem; margin-bottom: 8px; }
 .message-view__attachments ul { display: flex; flex-direction: column; gap: 6px; }
 .message-view__attachments li {
