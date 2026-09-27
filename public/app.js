@@ -516,6 +516,17 @@
    * are blocked by default via the CSP's img-src (data: URIs still work,
    * since they can't be used for tracking) and only allowed after the user
    * explicitly asks to load them, matching the "tracking pixel" concern.
+   *
+   * The frame is pinned to a LIGHT color scheme regardless of the app's
+   * theme. Email HTML routinely ships a `@media (prefers-color-scheme: dark)`
+   * block; inside an unpinned frame that block activates whenever the
+   * *visitor* is in dark mode, flipping the sender's text to a light color
+   * while their light background image/color is still blocked by the
+   * img-src policy — producing light text on a light background, i.e. an
+   * unreadable email. Pinning `color-scheme: light` keeps the sender's
+   * light-mode styling selected so their own colors always contrast
+   * correctly, and the frame's canvas is painted an explicit white so a
+   * transparent-bodied email is never dark-on-dark either.
    */
   function renderHtmlBody(html, imagesAllowed) {
     el.messageViewBody.innerHTML = "";
@@ -537,10 +548,19 @@
     iframe.setAttribute("title", "Email content");
     const imgSrc = imagesAllowed ? "data: https:" : "data:";
     const csp = `default-src 'none'; img-src ${imgSrc}; style-src 'unsafe-inline'; script-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none';`;
+    // `color-scheme: light` + an explicit canvas color keeps the sender's
+    // light-mode styles active and guarantees a light background even if the
+    // message body is transparent — see the note above renderHtmlBody.
     iframe.srcdoc =
       `<!DOCTYPE html><html><head><meta charset="utf-8">` +
+      `<meta name="color-scheme" content="light">` +
       `<meta http-equiv="Content-Security-Policy" content="${csp}">` +
-      `<style>body{font-family:sans-serif;color:#171a1f;margin:12px;word-break:break-word;} img{max-width:100%;}</style>` +
+      `<style>` +
+      `:root{color-scheme:light;}` +
+      `html{background:#ffffff;}` +
+      `body{background:#ffffff;color:#171a1f;font-family:sans-serif;margin:12px;word-break:break-word;}` +
+      `img{max-width:100%;height:auto;}` +
+      `</style>` +
       `</head><body>${html}</body></html>`;
     el.messageViewBody.appendChild(iframe);
   }
