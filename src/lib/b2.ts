@@ -17,8 +17,8 @@
  *    served): Put Object, Get Object, and batch Delete Objects (POST
  *    `?delete`, up to 1000 keys per call — B2 follows the S3 DeleteObjects
  *    contract, including its REQUIRED Content-MD5 request header, which
- *    Web Crypto cannot produce since it has no MD5; a compact RFC 1321
- *    implementation lives at the bottom of this file).
+ *    Web Crypto cannot produce since it has no MD5 — it comes from
+ *    `node:crypto` instead; see the Content-MD5 section at the bottom).
  *
  * Requests are signed with `aws4fetch`, a ~2.5 kB gzipped signer built for
  * Workers' fetch + SubtleCrypto, with built-in exponential-backoff retries
@@ -49,6 +49,7 @@
  * filenames or addresses).
  */
 
+import { createHash } from "node:crypto";
 import { AwsClient } from "aws4fetch";
 import type { Env } from "../types/index.js";
 
@@ -263,111 +264,29 @@ export async function deleteStoredObjects(env: Env, keys: string[]): Promise<voi
 }
 
 // ---------------------------------------------------------------------------
-// MD5 (RFC 1321) — needed solely for the Content-MD5 header on the B2 batch
-// Delete Objects call, which the S3/B2 contract requires. Web Crypto offers
-// no MD5, so this is a compact, allocation-light implementation over bytes.
-// Only ever applied to a small, self-generated XML document — never to
-// untrusted input or large payloads.
+// Content-MD5
 // ---------------------------------------------------------------------------
 
-const MD5_SHIFT_AMOUNTS = [
-  7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
-  5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
-  4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
-  6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
-];
-
-// K[i] = floor(|sin(i + 1)| * 2^32) — RFC 1321's constant table.
-const MD5_CONSTANTS = (() => {
-  const constants = new Uint32Array(64);
-  for (let i = 0; i < 64; i++) {
-    constants[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) >>> 0;
-  }
-  return constants;
-})();
-
+/**
+ * Base64 MD5 of a small XML document, for the Content-MD5 header that the
+ * S3/B2 DeleteObjects contract requires.
+ *
+ * This previously used a hand-rolled RFC 1321 implementation, because Web
+ * Crypto offers no MD5. That implementation silently produced WRONG digests
+ * for most inputs, so B2 rejected every batch delete with
+ * `InvalidRequest: Checksum does not match request body`. Because the
+ * failure was thrown from `deleteMailboxCascade`, one bad checksum aborted
+ * the entire cleanup batch AND left the mailbox's D1 rows in place, so the
+ * same expired mailbox was re-selected on every subsequent cron run —
+ * wedging attachment deletion permanently.
+ *
+ * The Worker already enables `nodejs_compat` (see wrangler.toml), so
+ * `node:crypto` supplies a correct, native MD5 and ~90 lines of
+ * hand-written crypto (and its bug surface) can go away entirely.
+ */
 function md5Base64(text: string): string {
-  const digest = md5Digest(new TextEncoder().encode(text));
+  const digest = createHash("md5").update(new TextEncoder().encode(text)).digest();
   let binary = "";
   for (const byte of digest) binary += String.fromCharCode(byte);
   return btoa(binary);
-}
-
-function md5Digest(input: Uint8Array): Uint8Array {
-  // Padding: original bytes + 0x80 + zeros (until length ≡ 56 mod 64) + 8-byte
-  // little-endian bit length.
-  const padZeros = ((55 - (input.length % 64)) + 64) % 64;
-  const totalLength = input.length + 1 + padZeros + 8;
-  const padded = new Uint8Array(totalLength);
-  padded.set(input);
-  padded[input.length] = 0x80;
-  const bitLength = input.length * 8;
-  for (let i = 0; i < 8; i++) {
-    padded[totalLength - 8 + i] = (bitLength / 2 ** (8 * i)) & 0xff;
-  }
-
-  let a0 = 0x67452301;
-  let b0 = 0xefcdab89;
-  let c0 = 0x98badcfe;
-  let d0 = 0x10325476;
-
-  const words = new Uint32Array(16);
-  for (let chunkStart = 0; chunkStart < totalLength; chunkStart += 64) {
-    for (let j = 0; j < 16; j++) {
-      const offset = chunkStart + j * 4;
-      words[j] =
-        padded[offset]! |
-        (padded[offset + 1]! << 8) |
-        (padded[offset + 2]! << 16) |
-        (padded[offset + 3]! << 24);
-    }
-
-    let a = a0;
-    let b = b0;
-    let c = c0;
-    let d = d0;
-
-    for (let i = 0; i < 64; i++) {
-      let f: number;
-      let g: number;
-      if (i < 16) {
-        f = (b & c) | (~b & d);
-        g = i;
-      } else if (i < 32) {
-        f = (d & b) | (~d & c);
-        g = (5 * i + 1) % 16;
-      } else if (i < 48) {
-        f = b ^ c ^ d;
-        g = (3 * i + 5) % 16;
-      } else {
-        f = c ^ (b | ~d);
-        g = (7 * i) % 16;
-      }
-
-      const sum = (f + a + MD5_CONSTANTS[i]! + words[g]!) >>> 0;
-      a = d;
-      d = c;
-      c = b;
-      b = (b + ((sum << MD5_SHIFT_AMOUNTS[i]!) | (sum >>> (32 - MD5_SHIFT_AMOUNTS[i]!)))) >>> 0;
-    }
-
-    a0 = (a0 + a) >>> 0;
-    b0 = (b0 + b) >>> 0;
-    c0 = (c0 + c) >>> 0;
-    d0 = (d0 + d) >>> 0;
-  }
-
-  const digest = new Uint8Array(16);
-  writeUint32Le(digest, 0, a0);
-  writeUint32Le(digest, 4, b0);
-  writeUint32Le(digest, 8, c0);
-  writeUint32Le(digest, 12, d0);
-  return digest;
-}
-
-function writeUint32Le(target: Uint8Array, offset: number, value: number): void {
-  target[offset] = value & 0xff;
-  target[offset + 1] = (value >>> 8) & 0xff;
-  target[offset + 2] = (value >>> 16) & 0xff;
-  target[offset + 3] = (value >>> 24) & 0xff;
 }

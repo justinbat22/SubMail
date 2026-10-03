@@ -238,6 +238,76 @@ describe("runExpiredMailboxCleanup", () => {
     ).not.toBeNull();
   });
 
+  it("isolates one mailbox's cascade failure so the rest of the batch still gets cleaned", async () => {
+    // Regression test for the production wedge: when B2 rejected a batch
+    // delete with a bad Content-MD5, the error propagated out of
+    // deleteMailboxCascade and aborted the whole loop. Because
+    // findExpiredMailboxes returns the OLDEST expired rows first, the same
+    // broken mailbox was then re-selected first on every future run and
+    // every other expired mailbox behind it was starved forever.
+    const failing = await createMailboxWithExpiry("aaa-will-fail", Date.now() - 2000);
+    const healthyOne = await createMailboxWithExpiry("bbb-healthy", Date.now() - 1500);
+    const healthyTwo = await createMailboxWithExpiry("ccc-healthy", Date.now() - 1000);
+
+    const failingMessage = await createMessage(env, {
+      mailboxId: failing.id,
+      messageId: null,
+      senderName: "Sender",
+      senderAddress: "sender@outside.example",
+      recipientAddress: failing.address,
+      subject: "Doomed",
+      textBody: "body",
+      htmlBody: null,
+      sizeBytes: 40,
+      hasAttachments: true,
+    });
+    const doomedKey = buildAttachmentR2Key(failing.id, failingMessage.id);
+    await env.ATTACHMENTS!.put(doomedKey, new TextEncoder().encode("doomed"));
+    await createAttachment(env, {
+      messageId: failingMessage.id,
+      filename: "doomed.txt",
+      contentType: "text/plain",
+      sizeBytes: 6,
+      r2Key: doomedKey,
+    });
+
+    // Make ONLY this mailbox's storage delete explode.
+    const bucket = env.ATTACHMENTS!;
+    const originalDelete = bucket.delete.bind(bucket);
+    bucket.delete = async (keys: string[]) => {
+      if (keys.includes(doomedKey)) throw new Error("Checksum does not match request body");
+      return originalDelete(keys);
+    };
+
+    let result;
+    try {
+      result = await runExpiredMailboxCleanup(env);
+    } finally {
+      bucket.delete = originalDelete;
+    }
+
+    // The failure is reported, not thrown...
+    expect(result.mailboxesFailed).toBe(1);
+    expect(result.mailboxesDeleted).toBe(2);
+
+    // ...the healthy mailboxes behind it are still deleted...
+    expect(
+      await env.DB.prepare("SELECT 1 FROM mailboxes WHERE id = ?").bind(healthyOne.id).first()
+    ).toBeNull();
+    expect(
+      await env.DB.prepare("SELECT 1 FROM mailboxes WHERE id = ?").bind(healthyTwo.id).first()
+    ).toBeNull();
+
+    // ...and the failed mailbox KEEPS its rows, because those rows are the
+    // only record of which storage keys still need deleting.
+    expect(
+      await env.DB.prepare("SELECT 1 FROM mailboxes WHERE id = ?").bind(failing.id).first()
+    ).not.toBeNull();
+    expect(
+      await env.DB.prepare("SELECT 1 FROM attachments WHERE r2_key = ?").bind(doomedKey).first()
+    ).not.toBeNull();
+  });
+
   it("also sweeps stale rate-limit windows older than 24 hours", async () => {
     const oldWindow = Date.now() - 25 * 60 * 60 * 1000;
     const recentWindow = Date.now();
